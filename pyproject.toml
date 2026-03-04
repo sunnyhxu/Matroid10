@@ -1,0 +1,17 @@
+[project]
+name = "matroid10-pipeline"
+version = "0.1.0"
+description = "Pipeline for non-paving matroid search and pure O-sequence verification"
+requires-python = ">=3.11"
+dependencies = [
+  "ortools>=9.10,<10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

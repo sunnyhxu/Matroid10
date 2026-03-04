@@ -1,0 +1,38 @@
+[pipeline]
+run_id_prefix = "matroid10"
+artifacts_dir = "artifacts"
+max_wall_seconds = 7200
+stop_on_counterexample = true
+
+[generation]
+binary = "cpp/build/gen_nonpaving"
+fields = [2, 3]
+rank_min = 4
+rank_max = 9
+n = 10
+threads = 8
+seed = 42
+max_seconds_total = 7200
+max_trials = 0
+dedup_global = true
+require_connected = true
+
+[hvec]
+script = "python/hvec_extract.py"
+check_h_formula = false
+check_h1_le_h2 = true
+check_h_rank_positive = true
+
+[cp]
+script = "python/pure_o_cp.py"
+timeout_seconds = 120
+num_workers = 8
+max_instances = 0
+
+[paths]
+non_paving_jsonl = "artifacts/non_paving.jsonl"
+hvec_jsonl = "artifacts/hvec.jsonl"
+pure_o_jsonl = "artifacts/pure_o_results.jsonl"
+metrics_json = "artifacts/metrics.json"
+manifest_json = "artifacts/run_manifest.json"
+counterexample_prefix = "artifacts/counterexample"
