@@ -17,6 +17,9 @@ EXIT_OK = 0
 EXIT_ERROR = 2
 EXIT_COUNTEREXAMPLE = 17
 
+MODE_REPRESENTABLE = "representable"
+MODE_SPARSE_PAVING = "sparse_paving"
+
 
 def parse_override_value(value: str) -> Any:
     lower = value.lower()
@@ -128,6 +131,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_mode(raw_mode: str) -> str:
+    mode = raw_mode.strip().lower().replace("-", "_")
+    if mode in {MODE_REPRESENTABLE, MODE_SPARSE_PAVING}:
+        return mode
+    raise ValueError(f"Unsupported generation.mode: {raw_mode}")
+
+
+def validate_shard_config(shard_index: int, shard_count: int) -> None:
+    if shard_count < 1:
+        raise ValueError("generation.shard_count must be >= 1")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError("generation.shard_index must satisfy 0 <= shard_index < shard_count")
+
+
+def validate_trial_index_start(trial_index_start: int) -> None:
+    if trial_index_start < 0:
+        raise ValueError("generation.trial_index_start must be >= 0")
+
+
+def write_progress_chunk(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dump_json(path, payload)
+
+
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parent.parent
@@ -146,6 +173,15 @@ def main() -> int:
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{run_prefix}_{run_stamp}"
 
+    generation_mode = normalize_mode(str(gen_cfg.get("mode", MODE_REPRESENTABLE)))
+    shard_index = int(gen_cfg.get("shard_index", 0))
+    shard_count = int(gen_cfg.get("shard_count", 1))
+    trial_index_start = int(gen_cfg.get("trial_index_start", 0))
+    validate_shard_config(shard_index, shard_count)
+    validate_trial_index_start(trial_index_start)
+    trial_start = shard_index + trial_index_start * shard_count
+    trial_stride = shard_count
+
     artifacts_dir = resolve_path(repo_root, str(pipeline_cfg.get("artifacts_dir", "artifacts")))
     ensure_dir(artifacts_dir)
 
@@ -160,7 +196,9 @@ def main() -> int:
     counterexample_out = Path(str(counterexample_prefix) + f"_{run_id}.json")
 
     phase_stats_dir = artifacts_dir / "phase_stats"
+    progress_chunks_dir = artifacts_dir / "progress_chunks"
     ensure_dir(phase_stats_dir)
+    ensure_dir(progress_chunks_dir)
 
     manifest: Dict[str, Any] = {
         "run_id": run_id,
@@ -168,6 +206,14 @@ def main() -> int:
         "config_path": str(cfg_path),
         "config": cfg,
         "status": "running",
+        "shard": {
+            "index": shard_index,
+            "count": shard_count,
+            "strategy": "trial_mod",
+            "trial_index_start": trial_index_start,
+            "trial_start": trial_start,
+            "trial_stride": trial_stride,
+        },
         "phases": {},
     }
     dump_json(manifest_out, manifest)
@@ -184,9 +230,7 @@ def main() -> int:
         dump_json(manifest_out, manifest)
         return EXIT_ERROR
 
-    fields = [int(x) for x in gen_cfg.get("fields", [2, 3])]
     max_seconds_total = int(gen_cfg.get("max_seconds_total", 7200))
-    per_field_seconds = max(1, max_seconds_total // max(1, len(fields)))
     global_seed = int(gen_cfg.get("seed", 42))
     threads = int(gen_cfg.get("threads", 1))
     rank_min = int(gen_cfg.get("rank_min", 4))
@@ -194,10 +238,45 @@ def main() -> int:
     n = int(gen_cfg.get("n", 10))
     max_trials = int(gen_cfg.get("max_trials", 0))
     dedup_global = bool(gen_cfg.get("dedup_global", True))
+    require_connected = bool(gen_cfg.get("require_connected", True))
 
-    field_outputs: List[Path] = []
-    phase1_cmds: List[List[str]] = []
-    for idx, field in enumerate(fields):
+    sparse_accept_prob = float(gen_cfg.get("sparse_accept_prob", 0.05))
+    sparse_min_ch = int(gen_cfg.get("sparse_min_circuit_hyperplanes", 1))
+    sparse_max_ch = int(gen_cfg.get("sparse_max_circuit_hyperplanes", 0))
+
+    phase1_targets: List[Dict[str, Any]] = []
+    if generation_mode == MODE_REPRESENTABLE:
+        fields = [int(x) for x in gen_cfg.get("fields", [2, 3])]
+        if not fields:
+            raise ValueError("generation.fields must not be empty for representable mode")
+        for idx, field in enumerate(fields):
+            phase1_targets.append(
+                {
+                    "category": f"representable_f{field}",
+                    "field": field,
+                    "seed": global_seed + idx * 1000003 + field * 10007,
+                    "out": artifacts_dir / f"non_paving_field{field}.jsonl",
+                    "stats": phase_stats_dir / f"gen_field{field}.json",
+                }
+            )
+    else:
+        phase1_targets.append(
+            {
+                "category": "sparse_paving",
+                "field": None,
+                "seed": global_seed,
+                "out": artifacts_dir / "non_paving_sparse_paving.jsonl",
+                "stats": phase_stats_dir / "gen_sparse_paving.json",
+            }
+        )
+
+    per_target_seconds = max(1, max_seconds_total // max(1, len(phase1_targets)))
+    phase1_outputs: List[Path] = []
+    phase1_commands: List[List[str]] = []
+    phase1_stats_files: List[Path] = []
+    phase1_chunk_files: List[Path] = []
+
+    for idx, target in enumerate(phase1_targets):
         if monotonic_seconds() - start > max_wall:
             manifest["status"] = "error"
             manifest["error"] = "pipeline_wall_timeout_before_phase1_complete"
@@ -205,15 +284,12 @@ def main() -> int:
             dump_json(manifest_out, manifest)
             return EXIT_ERROR
 
-        field_out = artifacts_dir / f"non_paving_field{field}.jsonl"
-        field_stats = phase_stats_dir / f"gen_field{field}.json"
-        field_seed = global_seed + idx * 1000003 + field * 10007
         cmd = [
             str(binary),
             "--config",
             str(cfg_path),
-            "--field",
-            str(field),
+            "--mode",
+            "representable" if generation_mode == MODE_REPRESENTABLE else "sparse-paving",
             "--rank-min",
             str(rank_min),
             "--rank-max",
@@ -223,36 +299,87 @@ def main() -> int:
             "--threads",
             str(threads),
             "--seed",
-            str(field_seed),
+            str(target["seed"]),
             "--max-seconds",
-            str(per_field_seconds),
+            str(per_target_seconds),
+            "--trial-start",
+            str(trial_start),
+            "--trial-stride",
+            str(trial_stride),
             "--out",
-            str(field_out),
+            str(target["out"]),
             "--stats-out",
-            str(field_stats),
+            str(target["stats"]),
         ]
+        if target["field"] is not None:
+            cmd.extend(["--field", str(target["field"])])
+        if require_connected:
+            cmd.append("--require-connected")
+        else:
+            cmd.append("--allow-disconnected")
         if max_trials > 0:
             cmd.extend(["--max-trials", str(max_trials)])
-        phase1_cmds.append(cmd)
-        proc = run_cmd(cmd, cwd=repo_root, phase=f"phase1.field{field}")
+        if generation_mode == MODE_SPARSE_PAVING:
+            cmd.extend(
+                [
+                    "--sparse-accept-prob",
+                    str(sparse_accept_prob),
+                    "--sparse-min-ch",
+                    str(sparse_min_ch),
+                    "--sparse-max-ch",
+                    str(sparse_max_ch),
+                ]
+            )
+
+        phase1_commands.append(cmd)
+        proc = run_cmd(cmd, cwd=repo_root, phase=f"phase1.{target['category']}")
         if proc.returncode != 0:
             print(proc.stdout)
             print(proc.stderr)
             manifest["status"] = "error"
-            manifest["error"] = f"phase1_failed_field_{field}_rc_{proc.returncode}"
-            manifest["phases"]["phase1"] = {"commands": phase1_cmds}
+            manifest["error"] = f"phase1_failed_{target['category']}_rc_{proc.returncode}"
+            manifest["phases"]["phase1"] = {"commands": phase1_commands}
             manifest["ended_at"] = utc_now_iso()
             dump_json(manifest_out, manifest)
             return EXIT_ERROR
-        field_outputs.append(field_out)
 
-    merge_stats = merge_non_paving(field_outputs, non_paving_out, dedup_global=dedup_global)
+        phase1_outputs.append(target["out"])
+        phase1_stats_files.append(target["stats"])
+        stats_payload = load_json_if_exists(target["stats"])
+        chunk_path = progress_chunks_dir / f"{run_id}_{target['category']}.json"
+        chunk_payload = {
+            "run_id": run_id,
+            "phase1_command_index": idx,
+            "created_at": utc_now_iso(),
+            "mode": generation_mode,
+            "category": target["category"],
+            "field": target["field"],
+            "n": n,
+            "seed": target["seed"],
+            "shard_index": shard_index,
+            "shard_count": shard_count,
+            "trial_index_start": trial_index_start,
+            "trial_start": trial_start,
+            "trial_stride": trial_stride,
+            "stats_path": str(target["stats"]),
+            "output_path": str(target["out"]),
+            "candidates": int(stats_payload.get("candidates", 0)),
+            "unique_hits": int(stats_payload.get("unique_hits", 0)),
+            "status": "ok",
+        }
+        write_progress_chunk(chunk_path, chunk_payload)
+        phase1_chunk_files.append(chunk_path)
+
+    merge_stats = merge_non_paving(phase1_outputs, non_paving_out, dedup_global=dedup_global)
     manifest["phases"]["phase1"] = {
-        "commands": phase1_cmds,
-        "field_outputs": [str(p) for p in field_outputs],
+        "mode": generation_mode,
+        "commands": phase1_commands,
+        "outputs": [str(p) for p in phase1_outputs],
         "merged_output": str(non_paving_out),
         "merge_stats": merge_stats,
-        "stats": {str(p): load_json_if_exists(p) for p in phase_stats_dir.glob("gen_field*.json")},
+        "stats": {str(p): load_json_if_exists(p) for p in phase1_stats_files},
+        "progress_chunks": [str(p) for p in phase1_chunk_files],
+        "shard": manifest["shard"],
     }
 
     if monotonic_seconds() - start > max_wall:
@@ -354,6 +481,7 @@ def main() -> int:
         "run_id": run_id,
         "status": status,
         "elapsed_seconds": elapsed,
+        "shard": manifest["shard"],
         "phase1": manifest["phases"].get("phase1", {}),
         "phase2": manifest["phases"].get("phase2", {}),
         "phase3": manifest["phases"].get("phase3", {}),
@@ -363,10 +491,7 @@ def main() -> int:
 
     dump_json(metrics_out, metrics)
     dump_json(manifest_out, manifest)
-
-    if status == "counterexample":
-        return EXIT_COUNTEREXAMPLE
-    return EXIT_OK
+    return EXIT_COUNTEREXAMPLE if status == "counterexample" else EXIT_OK
 
 
 if __name__ == "__main__":

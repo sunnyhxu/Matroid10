@@ -6,6 +6,7 @@ stop_on_counterexample = true
 
 [generation]
 binary = "cpp/build/gen_nonpaving"
+mode = "representable"
 fields = [2, 3]
 rank_min = 4
 rank_max = 9
@@ -14,6 +15,12 @@ threads = 8
 seed = 42
 max_seconds_total = 7200
 max_trials = 0
+shard_index = 0
+shard_count = 1
+trial_index_start = 0
+sparse_accept_prob = 0.05
+sparse_min_circuit_hyperplanes = 1
+sparse_max_circuit_hyperplanes = 0
 dedup_global = true
 require_connected = true
 
