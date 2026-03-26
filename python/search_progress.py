@@ -165,6 +165,34 @@ def aggregate_progress(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def get_progress_data(
+    chunks_glob: str = "artifacts/progress_chunks/*.json",
+    ledger_path: str = "artifacts/search_progress.jsonl",
+) -> List[Dict[str, Any]]:
+    """Return aggregated progress data without updating README.
+
+    Args:
+        chunks_glob: Glob pattern for progress chunk files (relative to repo root).
+        ledger_path: Path to the ledger JSONL file (relative to repo root).
+
+    Returns:
+        List of aggregated progress dictionaries with coverage information.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    resolved_chunks_glob = str(resolve_repo_path(repo_root, chunks_glob))
+    resolved_ledger_path = resolve_repo_path(repo_root, ledger_path)
+
+    chunk_rows: List[Dict[str, Any]] = []
+    for chunk_file in sorted(glob.glob(resolved_chunks_glob)):
+        with open(chunk_file, "r", encoding="utf-8") as f:
+            row = json.load(f)
+        row["source_path"] = str(Path(chunk_file))
+        chunk_rows.append(row)
+
+    ordered_rows = upsert_ledger_rows(load_jsonl(resolved_ledger_path), chunk_rows)
+    return aggregate_progress(ordered_rows)
+
+
 def render_table(rows: List[Dict[str, Any]]) -> str:
     lines = [
         "## Search Progress",

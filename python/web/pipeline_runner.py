@@ -70,13 +70,14 @@ class PipelineRunner:
         """Check if pipeline is currently running."""
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, trial_index_start: Optional[int] = None) -> bool:
+    def start(self, trial_index_start: Optional[int] = None, mode: Optional[str] = None) -> bool:
         """
         Start the pipeline in a background thread.
 
         Args:
             trial_index_start: Optional override for trial_index_start.
                               If None, uses value from state_manager.
+            mode: Optional generation mode override ("representable" or "sparse_paving").
 
         Returns:
             True if started successfully, False if already running.
@@ -86,7 +87,7 @@ class PipelineRunner:
 
         self._thread = threading.Thread(
             target=self._run_pipeline,
-            args=(trial_index_start,),
+            args=(trial_index_start, mode),
             daemon=True,
         )
         self._thread.start()
@@ -137,11 +138,15 @@ class PipelineRunner:
         if counters:
             self.state_manager.update(counters=counters)
 
-    def _run_pipeline(self, trial_index_start: Optional[int] = None) -> None:
+    def _run_pipeline(self, trial_index_start: Optional[int] = None, mode: Optional[str] = None) -> None:
         """Execute the pipeline phases with stop checks between subprocesses."""
         try:
             # Load config
             cfg = load_toml(self.config_path)
+
+            # Apply mode override if provided
+            if mode:
+                cfg.setdefault("generation", {})["mode"] = mode
 
             # Get trial_index_start from state if not provided
             if trial_index_start is None:

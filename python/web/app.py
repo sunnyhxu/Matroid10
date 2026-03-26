@@ -15,6 +15,13 @@ from .state_manager import StateManager
 from .dedup_store import DedupStore
 from .pipeline_runner import PipelineRunner
 
+try:
+    from ..search_progress import get_progress_data
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from search_progress import get_progress_data
+
 # Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ARTIFACTS_DIR = REPO_ROOT / "artifacts"
@@ -69,6 +76,7 @@ def get_pipeline_runner() -> PipelineRunner:
 
 class StartRequest(BaseModel):
     trial_index_start: Optional[int] = None
+    mode: Optional[str] = None  # "representable" or "sparse_paving"
 
 
 class StatusResponse(BaseModel):
@@ -125,8 +133,9 @@ async def start_pipeline(request: StartRequest = StartRequest()):
 
     # Use provided trial_index_start or default from state
     trial_start = request.trial_index_start
+    mode = request.mode
 
-    success = runner.start(trial_index_start=trial_start)
+    success = runner.start(trial_index_start=trial_start, mode=mode)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to start pipeline")
 
@@ -172,6 +181,16 @@ async def get_accumulated_stats():
     """Get accumulated results statistics."""
     stats = dedup_store.get_stats()
     return JSONResponse(content=stats)
+
+
+@app.post("/api/search-progress")
+async def get_search_progress():
+    """Run search progress calculation and return results."""
+    try:
+        progress = get_progress_data()
+        return JSONResponse(content={"progress": progress})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Mount static files (must be after API routes)

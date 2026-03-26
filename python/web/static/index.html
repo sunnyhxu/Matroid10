@@ -14,8 +14,17 @@
         </header>
 
         <section class="controls">
-            <button id="start-btn" class="btn btn-start">Start Pipeline</button>
-            <button id="stop-btn" class="btn btn-stop" disabled>Stop Pipeline</button>
+            <div class="mode-selector">
+                <label for="mode-select">Generation Mode:</label>
+                <select id="mode-select">
+                    <option value="representable">Representable (GF(2), GF(3))</option>
+                    <option value="sparse_paving">Sparse Paving</option>
+                </select>
+            </div>
+            <div class="control-buttons">
+                <button id="start-btn" class="btn btn-start">Start Pipeline</button>
+                <button id="stop-btn" class="btn btn-stop" disabled>Stop Pipeline</button>
+            </div>
         </section>
 
         <section class="info-row">
@@ -97,6 +106,14 @@
             <div class="info-card large">
                 <label>Total Unique Matroids (Deduplicated)</label>
                 <span class="counter-value" id="accumulated-unique">0</span>
+            </div>
+        </section>
+
+        <section class="search-progress">
+            <h2>Search Progress</h2>
+            <button id="refresh-progress-btn" class="btn btn-secondary">Refresh Coverage</button>
+            <div id="progress-table-container">
+                <p class="placeholder">Click "Refresh Coverage" to load progress data</p>
             </div>
         </section>
 

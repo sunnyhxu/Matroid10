@@ -7,6 +7,9 @@ const elements = {
     statusBadge: document.getElementById('status-badge'),
     startBtn: document.getElementById('start-btn'),
     stopBtn: document.getElementById('stop-btn'),
+    modeSelect: document.getElementById('mode-select'),
+    refreshProgressBtn: document.getElementById('refresh-progress-btn'),
+    progressTableContainer: document.getElementById('progress-table-container'),
     runId: document.getElementById('run-id'),
     nextTrial: document.getElementById('next-trial'),
     lastUpdated: document.getElementById('last-updated'),
@@ -47,10 +50,11 @@ async function fetchStatus() {
 async function startPipeline() {
     try {
         elements.startBtn.disabled = true;
+        const mode = elements.modeSelect.value;
         const response = await fetch('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ mode }),
         });
         if (!response.ok) {
             const data = await response.json();
@@ -88,6 +92,7 @@ function updateButtons(status, stopRequested) {
     const isRunning = status === 'running';
     elements.startBtn.disabled = isRunning;
     elements.stopBtn.disabled = !isRunning || stopRequested;
+    elements.modeSelect.disabled = isRunning;
 
     if (stopRequested && isRunning) {
         elements.stopBtn.textContent = 'Stopping...';
@@ -208,9 +213,58 @@ async function poll() {
     updateUI(data);
 }
 
+// Search progress functions
+async function fetchSearchProgress() {
+    elements.refreshProgressBtn.disabled = true;
+    elements.refreshProgressBtn.textContent = 'Loading...';
+    try {
+        const response = await fetch('/api/search-progress', { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        renderProgressTable(data.progress);
+    } catch (error) {
+        console.error('Failed to fetch search progress:', error);
+        elements.progressTableContainer.innerHTML = '<p class="error">Failed to load progress data</p>';
+    } finally {
+        elements.refreshProgressBtn.disabled = false;
+        elements.refreshProgressBtn.textContent = 'Refresh Coverage';
+    }
+}
+
+function renderProgressTable(progress) {
+    if (!progress || progress.length === 0) {
+        elements.progressTableContainer.innerHTML = '<p class="placeholder">No progress data available</p>';
+        return;
+    }
+    const html = `
+        <table class="progress-table">
+            <thead>
+                <tr>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Coverage</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${progress.map(row => `
+                    <tr>
+                        <td>${row.category_label}</td>
+                        <td class="status-${row.status.toLowerCase().replace(' ', '-')}">${row.status}</td>
+                        <td>${row.coverage_display}</td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+    elements.progressTableContainer.innerHTML = html;
+}
+
 // Event listeners
 elements.startBtn.addEventListener('click', startPipeline);
 elements.stopBtn.addEventListener('click', stopPipeline);
+elements.refreshProgressBtn.addEventListener('click', fetchSearchProgress);
 
 // Start polling on page load
 document.addEventListener('DOMContentLoaded', startPolling);
