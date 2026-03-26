@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matroid10 Pipeline</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Matroid10 Pipeline</h1>
+            <div class="status-badge" id="status-badge">Idle</div>
+        </header>
+
+        <section class="controls">
+            <button id="start-btn" class="btn btn-start">Start Pipeline</button>
+            <button id="stop-btn" class="btn btn-stop" disabled>Stop Pipeline</button>
+        </section>
+
+        <section class="info-row">
+            <div class="info-card">
+                <label>Run ID</label>
+                <span id="run-id">-</span>
+            </div>
+            <div class="info-card">
+                <label>Next Trial Index</label>
+                <span id="next-trial">0</span>
+            </div>
+            <div class="info-card">
+                <label>Last Updated</label>
+                <span id="last-updated">-</span>
+            </div>
+        </section>
+
+        <section class="phases">
+            <h2>Pipeline Phases</h2>
+
+            <div class="phase" id="phase1-container">
+                <div class="phase-header">
+                    <span class="phase-name">Phase 1: C++ Generation</span>
+                    <span class="phase-status" id="phase1-status">Pending</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="phase1-progress"></div>
+                </div>
+                <div class="phase-detail" id="phase1-detail"></div>
+            </div>
+
+            <div class="phase" id="phase2-container">
+                <div class="phase-header">
+                    <span class="phase-name">Phase 2: Sage h-vector</span>
+                    <span class="phase-status" id="phase2-status">Pending</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="phase2-progress"></div>
+                </div>
+                <div class="phase-detail" id="phase2-detail"></div>
+            </div>
+
+            <div class="phase" id="phase3-container">
+                <div class="phase-header">
+                    <span class="phase-name">Phase 3: CP-SAT Verification</span>
+                    <span class="phase-status" id="phase3-status">Pending</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="phase3-progress"></div>
+                </div>
+                <div class="phase-detail" id="phase3-detail"></div>
+            </div>
+        </section>
+
+        <section class="counters">
+            <h2>Counters</h2>
+            <div class="counter-grid">
+                <div class="counter-card">
+                    <span class="counter-value" id="total-processed">0</span>
+                    <span class="counter-label">Total Processed</span>
+                </div>
+                <div class="counter-card">
+                    <span class="counter-value" id="unique-found">0</span>
+                    <span class="counter-label">Unique Found</span>
+                </div>
+                <div class="counter-card">
+                    <span class="counter-value" id="feasible">0</span>
+                    <span class="counter-label">Feasible</span>
+                </div>
+                <div class="counter-card">
+                    <span class="counter-value" id="infeasible">0</span>
+                    <span class="counter-label">Infeasible</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="accumulated">
+            <h2>Accumulated Storage</h2>
+            <div class="info-card large">
+                <label>Total Unique Matroids (Deduplicated)</label>
+                <span class="counter-value" id="accumulated-unique">0</span>
+            </div>
+        </section>
+
+        <footer>
+            <p>Matroid10 Pipeline Web UI</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -4,9 +4,10 @@ import argparse
 import json
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     from .common import dump_json, ensure_dir, load_toml, monotonic_seconds, utc_now_iso
@@ -19,6 +20,64 @@ EXIT_COUNTEREXAMPLE = 17
 
 MODE_REPRESENTABLE = "representable"
 MODE_SPARSE_PAVING = "sparse_paving"
+
+
+@dataclass
+class PipelineContext:
+    """Holds all pipeline configuration and paths."""
+
+    repo_root: Path
+    cfg_path: Path
+    cfg: Dict[str, Any]
+    run_id: str
+    artifacts_dir: Path
+    phase_stats_dir: Path
+    progress_chunks_dir: Path
+
+    # Generation config
+    generation_mode: str
+    binary: Path
+    rank_min: int
+    rank_max: int
+    n: int
+    threads: int
+    global_seed: int
+    max_seconds_total: int
+    max_trials: int
+    dedup_global: bool
+    require_connected: bool
+    sparse_accept_prob: float
+    sparse_min_ch: int
+    sparse_max_ch: int
+
+    # Shard config
+    shard_index: int
+    shard_count: int
+    trial_index_start: int
+    trial_start: int
+    trial_stride: int
+
+    # Output paths
+    non_paving_out: Path
+    hvec_out: Path
+    pure_o_out: Path
+    metrics_out: Path
+    manifest_out: Path
+    counterexample_out: Path
+
+    # Hvec config
+    hvec_script: Path
+
+    # CP config
+    cp_script: Path
+    cp_timeout: float
+    cp_workers: int
+    cp_max_instances: int
+    stop_on_counterexample: bool
+
+    # Runtime
+    max_wall_seconds: int
+    start_time: float = field(default_factory=monotonic_seconds)
 
 
 def parse_override_value(value: str) -> Any:
@@ -155,13 +214,15 @@ def write_progress_chunk(path: Path, payload: Dict[str, Any]) -> None:
     dump_json(path, payload)
 
 
-def main() -> int:
-    args = parse_args()
-    repo_root = Path(__file__).resolve().parent.parent
-    cfg_path = resolve_path(repo_root, args.config)
-    cfg = load_toml(cfg_path)
-    for ovr in args.override:
-        apply_override(cfg, ovr)
+def create_context(
+    cfg_path: Path,
+    cfg: Dict[str, Any],
+    repo_root: Optional[Path] = None,
+    trial_index_start_override: Optional[int] = None,
+) -> PipelineContext:
+    """Create a PipelineContext from configuration."""
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent
 
     pipeline_cfg = cfg.get("pipeline", {})
     gen_cfg = cfg.get("generation", {})
@@ -176,191 +237,241 @@ def main() -> int:
     generation_mode = normalize_mode(str(gen_cfg.get("mode", MODE_REPRESENTABLE)))
     shard_index = int(gen_cfg.get("shard_index", 0))
     shard_count = int(gen_cfg.get("shard_count", 1))
-    trial_index_start = int(gen_cfg.get("trial_index_start", 0))
+    trial_index_start = trial_index_start_override if trial_index_start_override is not None else int(gen_cfg.get("trial_index_start", 0))
     validate_shard_config(shard_index, shard_count)
     validate_trial_index_start(trial_index_start)
     trial_start = shard_index + trial_index_start * shard_count
     trial_stride = shard_count
 
     artifacts_dir = resolve_path(repo_root, str(pipeline_cfg.get("artifacts_dir", "artifacts")))
-    ensure_dir(artifacts_dir)
+    phase_stats_dir = artifacts_dir / "phase_stats"
+    progress_chunks_dir = artifacts_dir / "progress_chunks"
 
-    non_paving_out = resolve_path(repo_root, str(paths_cfg.get("non_paving_jsonl", "artifacts/non_paving.jsonl")))
-    hvec_out = resolve_path(repo_root, str(paths_cfg.get("hvec_jsonl", "artifacts/hvec.jsonl")))
-    pure_o_out = resolve_path(repo_root, str(paths_cfg.get("pure_o_jsonl", "artifacts/pure_o_results.jsonl")))
-    metrics_out = resolve_path(repo_root, str(paths_cfg.get("metrics_json", "artifacts/metrics.json")))
-    manifest_out = resolve_path(repo_root, str(paths_cfg.get("manifest_json", "artifacts/run_manifest.json")))
     counterexample_prefix = resolve_path(
         repo_root, str(paths_cfg.get("counterexample_prefix", "artifacts/counterexample"))
     )
-    counterexample_out = Path(str(counterexample_prefix) + f"_{run_id}.json")
 
-    phase_stats_dir = artifacts_dir / "phase_stats"
-    progress_chunks_dir = artifacts_dir / "progress_chunks"
-    ensure_dir(phase_stats_dir)
-    ensure_dir(progress_chunks_dir)
+    return PipelineContext(
+        repo_root=repo_root,
+        cfg_path=cfg_path,
+        cfg=cfg,
+        run_id=run_id,
+        artifacts_dir=artifacts_dir,
+        phase_stats_dir=phase_stats_dir,
+        progress_chunks_dir=progress_chunks_dir,
+        generation_mode=generation_mode,
+        binary=resolve_path(repo_root, str(gen_cfg.get("binary", "cpp/build/gen_nonpaving"))),
+        rank_min=int(gen_cfg.get("rank_min", 4)),
+        rank_max=int(gen_cfg.get("rank_max", 9)),
+        n=int(gen_cfg.get("n", 10)),
+        threads=int(gen_cfg.get("threads", 1)),
+        global_seed=int(gen_cfg.get("seed", 42)),
+        max_seconds_total=int(gen_cfg.get("max_seconds_total", 7200)),
+        max_trials=int(gen_cfg.get("max_trials", 0)),
+        dedup_global=bool(gen_cfg.get("dedup_global", True)),
+        require_connected=bool(gen_cfg.get("require_connected", True)),
+        sparse_accept_prob=float(gen_cfg.get("sparse_accept_prob", 0.05)),
+        sparse_min_ch=int(gen_cfg.get("sparse_min_circuit_hyperplanes", 1)),
+        sparse_max_ch=int(gen_cfg.get("sparse_max_circuit_hyperplanes", 0)),
+        shard_index=shard_index,
+        shard_count=shard_count,
+        trial_index_start=trial_index_start,
+        trial_start=trial_start,
+        trial_stride=trial_stride,
+        non_paving_out=resolve_path(repo_root, str(paths_cfg.get("non_paving_jsonl", "artifacts/non_paving.jsonl"))),
+        hvec_out=resolve_path(repo_root, str(paths_cfg.get("hvec_jsonl", "artifacts/hvec.jsonl"))),
+        pure_o_out=resolve_path(repo_root, str(paths_cfg.get("pure_o_jsonl", "artifacts/pure_o_results.jsonl"))),
+        metrics_out=resolve_path(repo_root, str(paths_cfg.get("metrics_json", "artifacts/metrics.json"))),
+        manifest_out=resolve_path(repo_root, str(paths_cfg.get("manifest_json", "artifacts/run_manifest.json"))),
+        counterexample_out=Path(str(counterexample_prefix) + f"_{run_id}.json"),
+        hvec_script=resolve_path(repo_root, str(hvec_cfg.get("script", "python/hvec_extract.py"))),
+        cp_script=resolve_path(repo_root, str(cp_cfg.get("script", "python/pure_o_cp.py"))),
+        cp_timeout=float(cp_cfg.get("timeout_seconds", 120)),
+        cp_workers=int(cp_cfg.get("num_workers", 8)),
+        cp_max_instances=int(cp_cfg.get("max_instances", 0)),
+        stop_on_counterexample=bool(pipeline_cfg.get("stop_on_counterexample", True)),
+        max_wall_seconds=int(pipeline_cfg.get("max_wall_seconds", 7200)),
+    )
 
-    manifest: Dict[str, Any] = {
-        "run_id": run_id,
-        "started_at": utc_now_iso(),
-        "config_path": str(cfg_path),
-        "config": cfg,
-        "status": "running",
-        "shard": {
-            "index": shard_index,
-            "count": shard_count,
-            "strategy": "trial_mod",
-            "trial_index_start": trial_index_start,
-            "trial_start": trial_start,
-            "trial_stride": trial_stride,
-        },
-        "phases": {},
-    }
-    dump_json(manifest_out, manifest)
 
-    start = monotonic_seconds()
-    max_wall = int(pipeline_cfg.get("max_wall_seconds", 7200))
+def build_phase1_targets(ctx: PipelineContext) -> List[Dict[str, Any]]:
+    """Build list of phase 1 generation targets."""
+    gen_cfg = ctx.cfg.get("generation", {})
+    targets: List[Dict[str, Any]] = []
 
-    binary = resolve_path(repo_root, str(gen_cfg.get("binary", "cpp/build/gen_nonpaving")))
-    if not binary.exists():
-        print(f"Generator binary not found at {binary}. Build it with: bash scripts/build_cpp.sh")
-        manifest["status"] = "error"
-        manifest["error"] = f"missing_binary:{binary}"
-        manifest["ended_at"] = utc_now_iso()
-        dump_json(manifest_out, manifest)
-        return EXIT_ERROR
-
-    max_seconds_total = int(gen_cfg.get("max_seconds_total", 7200))
-    global_seed = int(gen_cfg.get("seed", 42))
-    threads = int(gen_cfg.get("threads", 1))
-    rank_min = int(gen_cfg.get("rank_min", 4))
-    rank_max = int(gen_cfg.get("rank_max", 9))
-    n = int(gen_cfg.get("n", 10))
-    max_trials = int(gen_cfg.get("max_trials", 0))
-    dedup_global = bool(gen_cfg.get("dedup_global", True))
-    require_connected = bool(gen_cfg.get("require_connected", True))
-
-    sparse_accept_prob = float(gen_cfg.get("sparse_accept_prob", 0.05))
-    sparse_min_ch = int(gen_cfg.get("sparse_min_circuit_hyperplanes", 1))
-    sparse_max_ch = int(gen_cfg.get("sparse_max_circuit_hyperplanes", 0))
-
-    phase1_targets: List[Dict[str, Any]] = []
-    if generation_mode == MODE_REPRESENTABLE:
+    if ctx.generation_mode == MODE_REPRESENTABLE:
         fields = [int(x) for x in gen_cfg.get("fields", [2, 3])]
         if not fields:
             raise ValueError("generation.fields must not be empty for representable mode")
-        for idx, field in enumerate(fields):
-            phase1_targets.append(
+        for idx, fld in enumerate(fields):
+            targets.append(
                 {
-                    "category": f"representable_f{field}",
-                    "field": field,
-                    "seed": global_seed + idx * 1000003 + field * 10007,
-                    "out": artifacts_dir / f"non_paving_field{field}.jsonl",
-                    "stats": phase_stats_dir / f"gen_field{field}.json",
+                    "category": f"representable_f{fld}",
+                    "field": fld,
+                    "seed": ctx.global_seed + idx * 1000003 + fld * 10007,
+                    "out": ctx.artifacts_dir / f"non_paving_field{fld}.jsonl",
+                    "stats": ctx.phase_stats_dir / f"gen_field{fld}.json",
                 }
             )
     else:
-        phase1_targets.append(
+        targets.append(
             {
                 "category": "sparse_paving",
                 "field": None,
-                "seed": global_seed,
-                "out": artifacts_dir / "non_paving_sparse_paving.jsonl",
-                "stats": phase_stats_dir / "gen_sparse_paving.json",
+                "seed": ctx.global_seed,
+                "out": ctx.artifacts_dir / "non_paving_sparse_paving.jsonl",
+                "stats": ctx.phase_stats_dir / "gen_sparse_paving.json",
             }
         )
 
-    per_target_seconds = max(1, max_seconds_total // max(1, len(phase1_targets)))
+    return targets
+
+
+def build_phase1_command(ctx: PipelineContext, target: Dict[str, Any], per_target_seconds: int) -> List[str]:
+    """Build a single phase 1 command for a target."""
+    cmd = [
+        str(ctx.binary),
+        "--config",
+        str(ctx.cfg_path),
+        "--mode",
+        "representable" if ctx.generation_mode == MODE_REPRESENTABLE else "sparse-paving",
+        "--rank-min",
+        str(ctx.rank_min),
+        "--rank-max",
+        str(ctx.rank_max),
+        "--n",
+        str(ctx.n),
+        "--threads",
+        str(ctx.threads),
+        "--seed",
+        str(target["seed"]),
+        "--max-seconds",
+        str(per_target_seconds),
+        "--trial-start",
+        str(ctx.trial_start),
+        "--trial-stride",
+        str(ctx.trial_stride),
+        "--out",
+        str(target["out"]),
+        "--stats-out",
+        str(target["stats"]),
+    ]
+    if target["field"] is not None:
+        cmd.extend(["--field", str(target["field"])])
+    if ctx.require_connected:
+        cmd.append("--require-connected")
+    else:
+        cmd.append("--allow-disconnected")
+    if ctx.max_trials > 0:
+        cmd.extend(["--max-trials", str(ctx.max_trials)])
+    if ctx.generation_mode == MODE_SPARSE_PAVING:
+        cmd.extend(
+            [
+                "--sparse-accept-prob",
+                str(ctx.sparse_accept_prob),
+                "--sparse-min-ch",
+                str(ctx.sparse_min_ch),
+                "--sparse-max-ch",
+                str(ctx.sparse_max_ch),
+            ]
+        )
+    return cmd
+
+
+def build_phase1_commands(ctx: PipelineContext) -> List[Dict[str, Any]]:
+    """Build all phase 1 commands with their targets."""
+    targets = build_phase1_targets(ctx)
+    per_target_seconds = max(1, ctx.max_seconds_total // max(1, len(targets)))
+
+    result = []
+    for target in targets:
+        cmd = build_phase1_command(ctx, target, per_target_seconds)
+        result.append({
+            "command": cmd,
+            "target": target,
+        })
+    return result
+
+
+def run_phase1(
+    ctx: PipelineContext,
+    stop_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Execute Phase 1 (C++ generation).
+
+    Args:
+        ctx: Pipeline context
+        stop_check: Optional callable that returns True if stop was requested
+        progress_callback: Optional callable to report progress updates
+
+    Returns:
+        Dict with phase results including outputs, stats, and any errors
+    """
+    ensure_dir(ctx.artifacts_dir)
+    ensure_dir(ctx.phase_stats_dir)
+    ensure_dir(ctx.progress_chunks_dir)
+
+    commands_info = build_phase1_commands(ctx)
     phase1_outputs: List[Path] = []
     phase1_commands: List[List[str]] = []
     phase1_stats_files: List[Path] = []
     phase1_chunk_files: List[Path] = []
 
-    for idx, target in enumerate(phase1_targets):
-        if monotonic_seconds() - start > max_wall:
-            manifest["status"] = "error"
-            manifest["error"] = "pipeline_wall_timeout_before_phase1_complete"
-            manifest["ended_at"] = utc_now_iso()
-            dump_json(manifest_out, manifest)
-            return EXIT_ERROR
+    for idx, info in enumerate(commands_info):
+        # Check for stop request
+        if stop_check and stop_check():
+            return {
+                "status": "stopped",
+                "outputs": phase1_outputs,
+                "commands": phase1_commands,
+                "stats_files": phase1_stats_files,
+            }
 
-        cmd = [
-            str(binary),
-            "--config",
-            str(cfg_path),
-            "--mode",
-            "representable" if generation_mode == MODE_REPRESENTABLE else "sparse-paving",
-            "--rank-min",
-            str(rank_min),
-            "--rank-max",
-            str(rank_max),
-            "--n",
-            str(n),
-            "--threads",
-            str(threads),
-            "--seed",
-            str(target["seed"]),
-            "--max-seconds",
-            str(per_target_seconds),
-            "--trial-start",
-            str(trial_start),
-            "--trial-stride",
-            str(trial_stride),
-            "--out",
-            str(target["out"]),
-            "--stats-out",
-            str(target["stats"]),
-        ]
-        if target["field"] is not None:
-            cmd.extend(["--field", str(target["field"])])
-        if require_connected:
-            cmd.append("--require-connected")
-        else:
-            cmd.append("--allow-disconnected")
-        if max_trials > 0:
-            cmd.extend(["--max-trials", str(max_trials)])
-        if generation_mode == MODE_SPARSE_PAVING:
-            cmd.extend(
-                [
-                    "--sparse-accept-prob",
-                    str(sparse_accept_prob),
-                    "--sparse-min-ch",
-                    str(sparse_min_ch),
-                    "--sparse-max-ch",
-                    str(sparse_max_ch),
-                ]
-            )
+        # Check wall time
+        if monotonic_seconds() - ctx.start_time > ctx.max_wall_seconds:
+            return {
+                "status": "timeout",
+                "error": "pipeline_wall_timeout_before_phase1_complete",
+                "outputs": phase1_outputs,
+                "commands": phase1_commands,
+            }
 
+        cmd = info["command"]
+        target = info["target"]
         phase1_commands.append(cmd)
-        proc = run_cmd(cmd, cwd=repo_root, phase=f"phase1.{target['category']}")
+
+        proc = run_cmd(cmd, cwd=ctx.repo_root, phase=f"phase1.{target['category']}")
         if proc.returncode != 0:
             print(proc.stdout)
             print(proc.stderr)
-            manifest["status"] = "error"
-            manifest["error"] = f"phase1_failed_{target['category']}_rc_{proc.returncode}"
-            manifest["phases"]["phase1"] = {"commands": phase1_commands}
-            manifest["ended_at"] = utc_now_iso()
-            dump_json(manifest_out, manifest)
-            return EXIT_ERROR
+            return {
+                "status": "error",
+                "error": f"phase1_failed_{target['category']}_rc_{proc.returncode}",
+                "commands": phase1_commands,
+                "outputs": phase1_outputs,
+            }
 
         phase1_outputs.append(target["out"])
         phase1_stats_files.append(target["stats"])
         stats_payload = load_json_if_exists(target["stats"])
-        chunk_path = progress_chunks_dir / f"{run_id}_{target['category']}.json"
+
+        chunk_path = ctx.progress_chunks_dir / f"{ctx.run_id}_{target['category']}.json"
         chunk_payload = {
-            "run_id": run_id,
+            "run_id": ctx.run_id,
             "phase1_command_index": idx,
             "created_at": utc_now_iso(),
-            "mode": generation_mode,
+            "mode": ctx.generation_mode,
             "category": target["category"],
             "field": target["field"],
-            "n": n,
+            "n": ctx.n,
             "seed": target["seed"],
-            "shard_index": shard_index,
-            "shard_count": shard_count,
-            "trial_index_start": trial_index_start,
-            "trial_start": trial_start,
-            "trial_stride": trial_stride,
+            "shard_index": ctx.shard_index,
+            "shard_count": ctx.shard_count,
+            "trial_index_start": ctx.trial_index_start,
+            "trial_start": ctx.trial_start,
+            "trial_stride": ctx.trial_stride,
             "stats_path": str(target["stats"]),
             "output_path": str(target["out"]),
             "candidates": int(stats_payload.get("candidates", 0)),
@@ -370,115 +481,243 @@ def main() -> int:
         write_progress_chunk(chunk_path, chunk_payload)
         phase1_chunk_files.append(chunk_path)
 
-    merge_stats = merge_non_paving(phase1_outputs, non_paving_out, dedup_global=dedup_global)
-    manifest["phases"]["phase1"] = {
-        "mode": generation_mode,
+        if progress_callback:
+            progress_callback("phase1", {
+                "target_index": idx,
+                "total_targets": len(commands_info),
+                "category": target["category"],
+                "stats": stats_payload,
+            })
+
+    # Merge outputs
+    merge_stats = merge_non_paving(phase1_outputs, ctx.non_paving_out, dedup_global=ctx.dedup_global)
+
+    return {
+        "status": "ok",
+        "mode": ctx.generation_mode,
         "commands": phase1_commands,
         "outputs": [str(p) for p in phase1_outputs],
-        "merged_output": str(non_paving_out),
+        "merged_output": str(ctx.non_paving_out),
         "merge_stats": merge_stats,
         "stats": {str(p): load_json_if_exists(p) for p in phase1_stats_files},
         "progress_chunks": [str(p) for p in phase1_chunk_files],
-        "shard": manifest["shard"],
     }
 
-    if monotonic_seconds() - start > max_wall:
-        manifest["status"] = "error"
-        manifest["error"] = "pipeline_wall_timeout_before_phase2"
-        manifest["ended_at"] = utc_now_iso()
-        dump_json(manifest_out, manifest)
-        return EXIT_ERROR
 
-    hvec_script = resolve_path(repo_root, str(hvec_cfg.get("script", "python/hvec_extract.py")))
-    hvec_stats = phase_stats_dir / "hvec_extract.json"
+def build_phase2_command(ctx: PipelineContext) -> List[str]:
+    """Build the phase 2 (h-vector extraction) command."""
     sage_exe = resolve_executable("sage")
-    phase2_cmd = [
+    hvec_stats = ctx.phase_stats_dir / "hvec_extract.json"
+    return [
         sage_exe,
         "-python",
-        str(hvec_script),
+        str(ctx.hvec_script),
         "--in",
-        str(non_paving_out),
+        str(ctx.non_paving_out),
         "--out",
-        str(hvec_out),
+        str(ctx.hvec_out),
         "--config",
-        str(cfg_path),
+        str(ctx.cfg_path),
         "--stats-out",
         str(hvec_stats),
     ]
-    proc2 = run_cmd(phase2_cmd, cwd=repo_root, phase="phase2")
-    if proc2.returncode != 0:
-        print(proc2.stdout)
-        print(proc2.stderr)
-        manifest["status"] = "error"
-        manifest["error"] = f"phase2_failed_rc_{proc2.returncode}"
-        manifest["phases"]["phase2"] = {"command": phase2_cmd}
-        manifest["ended_at"] = utc_now_iso()
-        dump_json(manifest_out, manifest)
-        return EXIT_ERROR
-    manifest["phases"]["phase2"] = {"command": phase2_cmd, "stats": load_json_if_exists(hvec_stats)}
 
-    if monotonic_seconds() - start > max_wall:
-        manifest["status"] = "error"
-        manifest["error"] = "pipeline_wall_timeout_before_phase3"
-        manifest["ended_at"] = utc_now_iso()
-        dump_json(manifest_out, manifest)
-        return EXIT_ERROR
 
-    cp_script = resolve_path(repo_root, str(cp_cfg.get("script", "python/pure_o_cp.py")))
-    cp_stats = phase_stats_dir / "pure_o_cp.json"
-    cp_timeout = float(cp_cfg.get("timeout_seconds", 120))
-    cp_workers = int(cp_cfg.get("num_workers", 8))
-    cp_max_instances = int(cp_cfg.get("max_instances", 0))
-    stop_on_counterexample = bool(pipeline_cfg.get("stop_on_counterexample", True))
+def run_phase2(
+    ctx: PipelineContext,
+    stop_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Execute Phase 2 (Sage h-vector extraction).
 
+    Returns:
+        Dict with phase results
+    """
+    if stop_check and stop_check():
+        return {"status": "stopped"}
+
+    if monotonic_seconds() - ctx.start_time > ctx.max_wall_seconds:
+        return {"status": "timeout", "error": "pipeline_wall_timeout_before_phase2"}
+
+    cmd = build_phase2_command(ctx)
+    hvec_stats = ctx.phase_stats_dir / "hvec_extract.json"
+
+    proc = run_cmd(cmd, cwd=ctx.repo_root, phase="phase2")
+    if proc.returncode != 0:
+        print(proc.stdout)
+        print(proc.stderr)
+        return {
+            "status": "error",
+            "error": f"phase2_failed_rc_{proc.returncode}",
+            "command": cmd,
+        }
+
+    stats = load_json_if_exists(hvec_stats)
+    if progress_callback:
+        progress_callback("phase2", {"stats": stats})
+
+    return {
+        "status": "ok",
+        "command": cmd,
+        "stats": stats,
+    }
+
+
+def build_phase3_command(ctx: PipelineContext) -> List[str]:
+    """Build the phase 3 (CP-SAT) command."""
     uv_exe = resolve_executable("uv")
-    phase3_cmd = [
+    cp_stats = ctx.phase_stats_dir / "pure_o_cp.json"
+    cmd = [
         uv_exe,
         "run",
         "python",
-        str(cp_script),
+        str(ctx.cp_script),
         "--in",
-        str(hvec_out),
+        str(ctx.hvec_out),
         "--out",
-        str(pure_o_out),
+        str(ctx.pure_o_out),
         "--timeout-sec",
-        str(cp_timeout),
+        str(ctx.cp_timeout),
         "--num-workers",
-        str(cp_workers),
+        str(ctx.cp_workers),
         "--run-id",
-        run_id,
+        ctx.run_id,
         "--counterexample-out",
-        str(counterexample_out),
+        str(ctx.counterexample_out),
         "--stats-out",
         str(cp_stats),
     ]
-    if cp_max_instances > 0:
-        phase3_cmd.extend(["--max-instances", str(cp_max_instances)])
-    if not stop_on_counterexample:
-        phase3_cmd.append("--no-stop-on-infeasible")
-    proc3 = run_cmd(phase3_cmd, cwd=repo_root, phase="phase3")
+    if ctx.cp_max_instances > 0:
+        cmd.extend(["--max-instances", str(ctx.cp_max_instances)])
+    if not ctx.stop_on_counterexample:
+        cmd.append("--no-stop-on-infeasible")
+    return cmd
 
-    if proc3.returncode not in (EXIT_OK, EXIT_COUNTEREXAMPLE):
-        print(proc3.stdout)
-        print(proc3.stderr)
+
+def run_phase3(
+    ctx: PipelineContext,
+    stop_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Execute Phase 3 (CP-SAT pure O-sequence verification).
+
+    Returns:
+        Dict with phase results
+    """
+    if stop_check and stop_check():
+        return {"status": "stopped"}
+
+    if monotonic_seconds() - ctx.start_time > ctx.max_wall_seconds:
+        return {"status": "timeout", "error": "pipeline_wall_timeout_before_phase3"}
+
+    cmd = build_phase3_command(ctx)
+    cp_stats = ctx.phase_stats_dir / "pure_o_cp.json"
+
+    proc = run_cmd(cmd, cwd=ctx.repo_root, phase="phase3")
+
+    if proc.returncode not in (EXIT_OK, EXIT_COUNTEREXAMPLE):
+        print(proc.stdout)
+        print(proc.stderr)
+        return {
+            "status": "error",
+            "error": f"phase3_failed_rc_{proc.returncode}",
+            "command": cmd,
+        }
+
+    stats = load_json_if_exists(cp_stats)
+    if progress_callback:
+        progress_callback("phase3", {"stats": stats})
+
+    is_counterexample = proc.returncode == EXIT_COUNTEREXAMPLE
+    return {
+        "status": "counterexample" if is_counterexample else "ok",
+        "command": cmd,
+        "stats": stats,
+        "counterexample_found": is_counterexample,
+    }
+
+
+def run_full_pipeline(
+    ctx: PipelineContext,
+    stop_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Run the complete pipeline (all 3 phases).
+
+    Returns:
+        Dict with full pipeline results
+    """
+    ensure_dir(ctx.artifacts_dir)
+    ensure_dir(ctx.phase_stats_dir)
+    ensure_dir(ctx.progress_chunks_dir)
+
+    manifest: Dict[str, Any] = {
+        "run_id": ctx.run_id,
+        "started_at": utc_now_iso(),
+        "config_path": str(ctx.cfg_path),
+        "config": ctx.cfg,
+        "status": "running",
+        "shard": {
+            "index": ctx.shard_index,
+            "count": ctx.shard_count,
+            "strategy": "trial_mod",
+            "trial_index_start": ctx.trial_index_start,
+            "trial_start": ctx.trial_start,
+            "trial_stride": ctx.trial_stride,
+        },
+        "phases": {},
+    }
+    dump_json(ctx.manifest_out, manifest)
+
+    # Check binary exists
+    if not ctx.binary.exists():
+        print(f"Generator binary not found at {ctx.binary}. Build it with: bash scripts/build_cpp.sh")
         manifest["status"] = "error"
-        manifest["error"] = f"phase3_failed_rc_{proc3.returncode}"
-        manifest["phases"]["phase3"] = {"command": phase3_cmd}
+        manifest["error"] = f"missing_binary:{ctx.binary}"
         manifest["ended_at"] = utc_now_iso()
-        dump_json(manifest_out, manifest)
-        return EXIT_ERROR
+        dump_json(ctx.manifest_out, manifest)
+        return {"status": "error", "error": manifest["error"], "exit_code": EXIT_ERROR}
 
-    phase3_stats = load_json_if_exists(cp_stats)
-    manifest["phases"]["phase3"] = {"command": phase3_cmd, "stats": phase3_stats}
+    # Phase 1
+    phase1_result = run_phase1(ctx, stop_check, progress_callback)
+    manifest["phases"]["phase1"] = phase1_result
+    manifest["phases"]["phase1"]["shard"] = manifest["shard"]
 
-    elapsed = monotonic_seconds() - start
-    status = "counterexample" if proc3.returncode == EXIT_COUNTEREXAMPLE else "ok"
+    if phase1_result["status"] != "ok":
+        manifest["status"] = phase1_result["status"]
+        if "error" in phase1_result:
+            manifest["error"] = phase1_result["error"]
+        manifest["ended_at"] = utc_now_iso()
+        dump_json(ctx.manifest_out, manifest)
+        return {"status": phase1_result["status"], "manifest": manifest, "exit_code": EXIT_ERROR}
+
+    # Phase 2
+    phase2_result = run_phase2(ctx, stop_check, progress_callback)
+    manifest["phases"]["phase2"] = phase2_result
+
+    if phase2_result["status"] != "ok":
+        manifest["status"] = phase2_result["status"]
+        if "error" in phase2_result:
+            manifest["error"] = phase2_result["error"]
+        manifest["ended_at"] = utc_now_iso()
+        dump_json(ctx.manifest_out, manifest)
+        return {"status": phase2_result["status"], "manifest": manifest, "exit_code": EXIT_ERROR}
+
+    # Phase 3
+    phase3_result = run_phase3(ctx, stop_check, progress_callback)
+    manifest["phases"]["phase3"] = phase3_result
+
+    elapsed = monotonic_seconds() - ctx.start_time
+    status = "counterexample" if phase3_result.get("counterexample_found") else phase3_result["status"]
     manifest["status"] = status
     manifest["ended_at"] = utc_now_iso()
     manifest["elapsed_seconds"] = elapsed
 
     metrics = {
-        "run_id": run_id,
+        "run_id": ctx.run_id,
         "status": status,
         "elapsed_seconds": elapsed,
         "shard": manifest["shard"],
@@ -486,12 +725,27 @@ def main() -> int:
         "phase2": manifest["phases"].get("phase2", {}),
         "phase3": manifest["phases"].get("phase3", {}),
     }
-    if status == "counterexample" and counterexample_out.exists():
-        metrics["counterexample_path"] = str(counterexample_out)
+    if status == "counterexample" and ctx.counterexample_out.exists():
+        metrics["counterexample_path"] = str(ctx.counterexample_out)
 
-    dump_json(metrics_out, metrics)
-    dump_json(manifest_out, manifest)
-    return EXIT_COUNTEREXAMPLE if status == "counterexample" else EXIT_OK
+    dump_json(ctx.metrics_out, metrics)
+    dump_json(ctx.manifest_out, manifest)
+
+    exit_code = EXIT_COUNTEREXAMPLE if status == "counterexample" else EXIT_OK
+    return {"status": status, "manifest": manifest, "exit_code": exit_code}
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg_path = resolve_path(repo_root, args.config)
+    cfg = load_toml(cfg_path)
+    for ovr in args.override:
+        apply_override(cfg, ovr)
+
+    ctx = create_context(cfg_path, cfg, repo_root)
+    result = run_full_pipeline(ctx)
+    return result["exit_code"]
 
 
 if __name__ == "__main__":

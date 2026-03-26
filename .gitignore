@@ -17,3 +17,8 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+agents.md
+.claude/
+.codex/
+plans/
