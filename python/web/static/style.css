@@ -320,6 +320,12 @@ h2 {
 .status-not-started { color: var(--text-secondary); }
 .status-sampled { color: var(--accent-yellow); }
 .status-complete { color: var(--accent-green); }
+.status-active { color: var(--accent-green); }
+
+.progress-table .numeric {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
 
 .placeholder {
     color: var(--text-secondary);

@@ -243,16 +243,20 @@ function renderProgressTable(progress) {
             <thead>
                 <tr>
                     <th>Category</th>
+                    <th>Trials</th>
+                    <th>Unique</th>
+                    <th>Yield</th>
                     <th>Status</th>
-                    <th>Coverage</th>
                 </tr>
             </thead>
             <tbody>
                 ${progress.map(row => `
                     <tr>
                         <td>${row.category_label}</td>
+                        <td class="numeric">${row.trials_display}</td>
+                        <td class="numeric">${row.unique_display}</td>
+                        <td class="numeric">${row.yield_display}</td>
                         <td class="status-${row.status.toLowerCase().replace(' ', '-')}">${row.status}</td>
-                        <td>${row.coverage_display}</td>
                     </tr>
                 `).join('')}
             </tbody>

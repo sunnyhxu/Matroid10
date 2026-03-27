@@ -16,11 +16,11 @@ from .dedup_store import DedupStore
 from .pipeline_runner import PipelineRunner
 
 try:
-    from ..search_progress import get_progress_data
+    from ..search_progress import refresh_progress
 except ImportError:
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from search_progress import get_progress_data
+    from search_progress import refresh_progress
 
 # Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -185,9 +185,9 @@ async def get_accumulated_stats():
 
 @app.post("/api/search-progress")
 async def get_search_progress():
-    """Run search progress calculation and return results."""
+    """Refresh search progress, update README, and return results."""
     try:
-        progress = get_progress_data()
+        progress = refresh_progress(update_readme=True)
         return JSONResponse(content={"progress": progress})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

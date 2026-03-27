@@ -102,66 +102,67 @@ def infer_category(row: Dict[str, Any]) -> str:
     return ""
 
 
-def universe_for_category(category: str, n: int) -> int:
-    if category == "representable_f2":
-        return 2 ** (n * n)
-    if category == "representable_f3":
-        return 3 ** (n * n)
-    if category == "sparse_paving":
-        return 2_500_000_000_000
-    return 0
+def format_number(n: int) -> str:
+    """Format large numbers with M/K suffix."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
 
 
-def format_coverage(percent: float) -> str:
+def format_yield(percent: float) -> str:
+    """Format yield percentage."""
     if percent <= 0:
-        return "0.000000%"
-    if percent < 0.0001:
-        return f"{percent:.3e}%"
+        return "0%"
+    if percent < 0.001:
+        return f"{percent:.4f}%"
     if percent < 1:
-        return f"{percent:.6f}%"
-    return f"{percent:.2f}%"
+        return f"{percent:.3f}%"
+    return f"{percent:.1f}%"
 
 
 def aggregate_progress(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     summary: Dict[str, Dict[str, Any]] = {}
     for cat in CATEGORY_ORDER:
-        summary[cat] = {"category": cat, "attempted": 0, "n": 10}
+        summary[cat] = {"category": cat, "candidates": 0, "unique_hits": 0, "n": 10}
 
     for row in rows:
         category = infer_category(row)
         if not category:
             continue
-        attempted = int(row.get("candidates", 0))
-        n = int(row.get("n", 10))
-        summary[category]["attempted"] += attempted
-        summary[category]["n"] = n
+        summary[category]["candidates"] += int(row.get("candidates", 0))
+        summary[category]["unique_hits"] += int(row.get("unique_hits", 0))
+        summary[category]["n"] = int(row.get("n", 10))
 
     out: List[Dict[str, Any]] = []
     for cat in CATEGORY_ORDER:
         item = summary[cat]
-        n = int(item["n"])
-        attempted = int(item["attempted"])
-        universe = universe_for_category(cat, n)
-        coverage = (100.0 * attempted / float(universe)) if universe > 0 else 0.0
-        if attempted <= 0:
+        candidates = item["candidates"]
+        unique = item["unique_hits"]
+
+        if candidates <= 0:
             status = "Not Started"
-        elif attempted >= universe:
-            status = "Complete"
+            yield_pct = 0.0
+            yield_display = "-"
         else:
-            status = "Sampled"
-        out.append(
-            {
-                "category": cat,
-                "category_label": CATEGORY_INFO[cat]["label"],
-                "method": CATEGORY_INFO[cat]["method"],
-                "n": n,
-                "attempted": attempted,
-                "universe": universe,
-                "coverage_percent": coverage,
-                "coverage_display": format_coverage(coverage),
-                "status": status,
-            }
-        )
+            status = "Active" if unique > 0 else "Sampled"
+            yield_pct = 100.0 * unique / candidates
+            yield_display = format_yield(yield_pct)
+
+        out.append({
+            "category": cat,
+            "category_label": CATEGORY_INFO[cat]["label"],
+            "method": CATEGORY_INFO[cat]["method"],
+            "n": item["n"],
+            "trials": candidates,
+            "trials_display": format_number(candidates),
+            "unique": unique,
+            "unique_display": format_number(unique),
+            "yield_percent": yield_pct,
+            "yield_display": yield_display,
+            "status": status,
+        })
     return out
 
 
@@ -193,16 +194,57 @@ def get_progress_data(
     return aggregate_progress(ordered_rows)
 
 
+def refresh_progress(
+    chunks_glob: str = "artifacts/progress_chunks/*.json",
+    ledger_path: str = "artifacts/search_progress.jsonl",
+    readme_path: str = "README.md",
+    update_readme: bool = True,
+) -> List[Dict[str, Any]]:
+    """Refresh progress data, update ledger, optionally update README.
+
+    Returns aggregated progress data.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    resolved_chunks_glob = str(resolve_repo_path(repo_root, chunks_glob))
+    resolved_ledger_path = resolve_repo_path(repo_root, ledger_path)
+    resolved_readme_path = resolve_repo_path(repo_root, readme_path)
+
+    # Load and merge chunks
+    chunk_rows: List[Dict[str, Any]] = []
+    for chunk_file in sorted(glob.glob(resolved_chunks_glob)):
+        with open(chunk_file, "r", encoding="utf-8") as f:
+            row = json.load(f)
+        row["source_path"] = str(Path(chunk_file))
+        chunk_rows.append(row)
+
+    ordered_rows = upsert_ledger_rows(load_jsonl(resolved_ledger_path), chunk_rows)
+
+    # Save updated ledger
+    dump_jsonl(resolved_ledger_path, ordered_rows)
+
+    # Aggregate
+    progress = aggregate_progress(ordered_rows)
+
+    # Update README if requested
+    if update_readme:
+        table_block = render_table(progress)
+        readme_text = resolved_readme_path.read_text(encoding="utf-8") if resolved_readme_path.exists() else ""
+        updated = replace_readme_section(readme_text, table_block)
+        resolved_readme_path.write_text(updated, encoding="utf-8")
+
+    return progress
+
+
 def render_table(rows: List[Dict[str, Any]]) -> str:
     lines = [
         "## Search Progress",
         "",
-        "| Category | Elements (n) | Status | Method | Coverage |",
-        "|---|---:|---|---|---:|",
+        "| Category | Trials | Unique | Yield | Status |",
+        "|---|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
-            f"| {row['category_label']} | {row['n']} | {row['status']} | {row['method']} | {row['coverage_display']} |"
+            f"| {row['category_label']} | {row['trials_display']} | {row['unique_display']} | {row['yield_display']} | {row['status']} |"
         )
     return "\n".join(lines)
 
@@ -219,41 +261,21 @@ def replace_readme_section(readme_text: str, table_block: str) -> str:
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parent.parent
-    chunks_glob = str(resolve_repo_path(repo_root, args.chunks_glob))
-    ledger_path = resolve_repo_path(repo_root, args.ledger)
-    readme_path = resolve_repo_path(repo_root, args.readme)
     write_readme = args.write_readme and not args.no_write_readme
 
-    chunk_rows: List[Dict[str, Any]] = []
-    for chunk_file in sorted(glob.glob(chunks_glob)):
-        with open(chunk_file, "r", encoding="utf-8") as f:
-            row = json.load(f)
-        row["source_path"] = str(Path(chunk_file))
-        chunk_rows.append(row)
-    ordered_rows = upsert_ledger_rows(load_jsonl(ledger_path), chunk_rows)
-    ingested = len(chunk_rows)
-    dump_jsonl(ledger_path, ordered_rows)
-
-    aggregate = aggregate_progress(ordered_rows)
-    table_block = render_table(aggregate)
-
-    if write_readme:
-        readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
-        updated = replace_readme_section(readme_text, table_block)
-        readme_path.write_text(updated, encoding="utf-8")
-
-    print(
-        json.dumps(
-            {
-                "chunks_ingested": ingested,
-                "ledger_rows": len(ordered_rows),
-                "ledger_path": str(ledger_path),
-                "readme_updated": bool(write_readme),
-                "readme_path": str(readme_path),
-            }
-        )
+    progress = refresh_progress(
+        chunks_glob=args.chunks_glob,
+        ledger_path=args.ledger,
+        readme_path=args.readme,
+        update_readme=write_readme,
     )
+
+    print(json.dumps({
+        "categories": len(progress),
+        "total_trials": sum(p["trials"] for p in progress),
+        "total_unique": sum(p["unique"] for p in progress),
+        "readme_updated": write_readme,
+    }))
     return 0
 
 
