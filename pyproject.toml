@@ -5,6 +5,8 @@ description = "Pipeline for non-paving matroid search and pure O-sequence verifi
 requires-python = ">=3.11"
 dependencies = [
   "ortools>=9.10,<10",
+  "fastapi>=0.109.0",
+  "uvicorn[standard]>=0.27.0",
 ]
 
 [project.optional-dependencies]

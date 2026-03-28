@@ -17,3 +17,11 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+.cache_verify/
+.verify_extract/
+
+agents.md
+.claude/
+.codex/
+plans/

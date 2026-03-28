@@ -27,3 +27,28 @@ Each pipeline run writes `run_manifest.json` including:
 - executable/script versions and command lines
 - counts and phase durations
 - terminal status (`ok`, `counterexample`, or `error`)
+
+## Sparse Paving Recovery Run (2026-03-27)
+
+Recovered downstream processing from the saved sparse-paving Phase 1 artifact:
+
+- Label: `sparse_paving_recovery_20260327`
+- Phase 1 source: `artifacts/non_paving_sparse_paving.jsonl`
+- Phase 1 stats: `15,023,699` candidates, `3,030,877` unique sparse-paving hits
+- Phase 2 stats: `3,151,887` records processed, `3,151,887` passed to CP, `0` extraction errors, `2137.16s`
+- Phase 3 stats: `3,151,887` records considered, `62` unique h-vectors solved, `3,151,825` cache hits, `3,151,887` feasible, `0` infeasible, `330.42s`
+- Counterexamples found: none
+
+Primary recovery outputs:
+
+- `artifacts/hvec_sparse_paving_recovery_20260327.jsonl`
+- `artifacts/pure_o_results_sparse_paving_recovery_20260327.jsonl`
+- `artifacts/phase_stats/hvec_extract_sparse_paving_recovery_20260327.json`
+- `artifacts/phase_stats/pure_o_cp_sparse_paving_recovery_20260327.json`
+
+Clean deduplicated exports derived from the Phase 3 output:
+
+- `artifacts/dedup/matroids_sparse_paving_recovery_20260327.jsonl` with `3,151,887` unique matroid records
+- `artifacts/dedup/hvectors_sparse_paving_recovery_20260327.jsonl` with `62` unique h-vectors, feasibility counts, and one witness pure O-sequence per feasible h-vector
+- `artifacts/dedup/summary_sparse_paving_recovery_20260327.json`
+- `artifacts/dedup/witness_summary_sparse_paving_recovery_20260327.json`
