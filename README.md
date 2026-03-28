@@ -31,6 +31,15 @@ Pipeline for generating 10-element matroids (representable and sparse paving) an
        - next block (`trial_index_start=1000`) covers `k=1000..1999` without overlap
 7. Update progress ledger + README table:
    - `uv run python python/search_progress.py`
+8. Continue downstream processing from an existing sparse-paving Phase 1 artifact:
+   - `bash scripts/run_sparse_paving_recovery.sh <label>`
+9. Extract clean per-run deduplicated outputs from a raw Phase 3 JSONL:
+   - `uv run python python/extract_deduplicated_results.py --in artifacts/pure_o_results_<label>.jsonl --matroids-out artifacts/dedup/matroids_<label>.jsonl --hvectors-out artifacts/dedup/hvectors_<label>.jsonl --summary-out artifacts/dedup/summary_<label>.json`
+10. Optional: attach one pure O-sequence witness per deduplicated feasible h-vector:
+   - `uv run python python/attach_pure_o_witnesses.py --in artifacts/dedup/hvectors_<label>.jsonl --out artifacts/dedup/hvectors_<label>.jsonl --summary-out artifacts/dedup/witness_summary_<label>.json`
+11. Optional: remove bulky experimental intermediates while keeping canonical representable outputs and deduplicated sparse outputs:
+   - `uv run python python/cleanup_artifacts.py`
+   - `uv run python python/cleanup_artifacts.py --apply`
 
 ## Web UI
 
@@ -77,21 +86,29 @@ Then open http://localhost:8000 in your browser.
 - `artifacts/run_state.json` (web UI persistent state)
 - `artifacts/accumulated_results.jsonl` (deduplicated results across runs)
 - `artifacts/seen_ids.json` (index of seen matroid IDs for fast dedup)
+- `artifacts/dedup/matroids_<label>.jsonl` (clean per-run deduplicated matroids)
+- `artifacts/dedup/hvectors_<label>.jsonl` (deduplicated h-vectors with feasibility, counts, and optional pure O witness)
+- `artifacts/dedup/summary_<label>.json` (per-run dedup summary)
+- `artifacts/dedup/witness_summary_<label>.json` (optional witness attachment summary)
 
 See `docs/pipeline.md` and `docs/schema.md` for details.
 
 ## Notes
 
 - `python/hvec_extract.py` computes h-vectors from `Matroid.f_vector()` for Sage 10.7 compatibility.
+- `scripts/run_sparse_paving_recovery.sh` resumes Phase 2 and Phase 3 from `artifacts/non_paving_sparse_paving.jsonl` and writes labeled recovery outputs.
+- `python/extract_deduplicated_results.py` writes clean per-run deduplicated exports under `artifacts/dedup/`.
+- `python/attach_pure_o_witnesses.py` enriches the deduplicated h-vector export with one witness pure O-sequence per feasible h-vector.
+- `python/cleanup_artifacts.py` removes raw sparse intermediates, probes, logs, and timestamped duplicate exports while preserving canonical outputs.
 - Optional Tutte cross-check (`T_M(x,1)`) can be enabled with `hvec.check_h_formula = true`.
 - By default, Phase 1 filters disconnected matroids and Phase 2 filters `h_rank <= 0` before CP-SAT.
 
 <!-- SEARCH_PROGRESS:START -->
 ## Search Progress
 
-| Category | Elements (n) | Status | Method | Coverage |
-|---|---:|---|---|---:|
-| Representable $\mathbb{F}_2$ | 10 | Not Started | Bitset C++ / CP-SAT | 0.000000% |
-| Representable $\mathbb{F}_3$ | 10 | Not Started | GFq C++ / CP-SAT | 0.000000% |
-| Sparse Paving | 10 | Not Started | Heuristic Search | 0.000000% |
+| Category | Trials | Unique | Yield | Status |
+|---|---:|---:|---:|---|
+| Representable $\mathbb{F}_2$ | 95.3M | 639 | 0.0007% | Active |
+| Representable $\mathbb{F}_3$ | 14.4M | 6.3K | 0.044% | Active |
+| Sparse Paving | 15.0M | 3.0M | 20.2% | Active |
 <!-- SEARCH_PROGRESS:END -->

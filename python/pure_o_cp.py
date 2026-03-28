@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     from .common import dump_json, monotonic_seconds
@@ -39,9 +39,10 @@ class CPResult:
     wall_time: float
     model_size: Dict[str, int]
     error: str | None = None
+    witness: Dict[str, Any] | None = None
 
 
-def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) -> CPResult:
+def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int, emit_witness: bool = False) -> CPResult:
     try:
         from ortools.sat.python import cp_model
     except Exception as ex:  # noqa: BLE001
@@ -50,6 +51,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) ->
             wall_time=0.0,
             model_size={"num_vars": 0, "num_constraints": 0, "num_degree_buckets": 0},
             error=f"ortools_import_failed:{ex}",
+            witness=None,
         )
 
     if not h_vector or any(x < 0 for x in h_vector):
@@ -58,6 +60,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) ->
             wall_time=0.0,
             model_size={"num_vars": 0, "num_constraints": 0, "num_degree_buckets": 0},
             error="invalid_h_vector",
+            witness=None,
         )
 
     d = len(h_vector) - 1
@@ -76,6 +79,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) ->
                     "num_degree_buckets": len(by_deg),
                 },
                 error=f"degree_{k}_count_exceeds_capacity",
+                witness=None,
             )
 
     model = cp_model.CpModel()
@@ -134,6 +138,15 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) ->
     else:
         cp_status = "ERROR"
 
+    witness = None
+    if cp_status == "FEASIBLE" and emit_witness:
+        selected_monomials = [list(alpha) for alpha, var in x.items() if solver.BooleanValue(var)]
+        witness = {
+            "n_vars": n_vars,
+            "max_degree": d,
+            "selected_monomials": selected_monomials,
+        }
+
     return CPResult(
         status=cp_status,
         wall_time=wall_time,
@@ -142,6 +155,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int) ->
             "num_constraints": constraints,
             "num_degree_buckets": len(by_deg),
         },
+        witness=witness,
     )
 
 
@@ -187,11 +201,14 @@ def main() -> int:
     start = monotonic_seconds()
     considered = 0
     attempted = 0
+    unique_h_vectors_attempted = 0
+    cache_hits = 0
     feasible = 0
     infeasible = 0
     unknown = 0
     errors = 0
     counterexample_path: str | None = None
+    cached_results: Dict[Tuple[int, ...], CPResult] = {}
 
     with in_path.open("r", encoding="utf-8") as fin, out_path.open("w", encoding="utf-8") as fout:
         for raw in fin:
@@ -207,7 +224,14 @@ def main() -> int:
                 break
 
             h_vector = [int(x) for x in record.get("h_vector", [])]
-            result = solve_h_vector(h_vector, timeout_sec=args.timeout_sec, num_workers=args.num_workers)
+            h_vector_key = tuple(h_vector)
+            if h_vector_key in cached_results:
+                result = cached_results[h_vector_key]
+                cache_hits += 1
+            else:
+                result = solve_h_vector(h_vector, timeout_sec=args.timeout_sec, num_workers=args.num_workers)
+                cached_results[h_vector_key] = result
+                unique_h_vectors_attempted += 1
 
             if result.status == "FEASIBLE":
                 feasible += 1
@@ -239,6 +263,8 @@ def main() -> int:
                     "phase": "pure_o_cp",
                     "considered": considered,
                     "attempted": attempted,
+                    "unique_h_vectors_attempted": unique_h_vectors_attempted,
+                    "cache_hits": cache_hits,
                     "feasible": feasible,
                     "infeasible": infeasible,
                     "unknown": unknown,
@@ -256,6 +282,8 @@ def main() -> int:
         "phase": "pure_o_cp",
         "considered": considered,
         "attempted": attempted,
+        "unique_h_vectors_attempted": unique_h_vectors_attempted,
+        "cache_hits": cache_hits,
         "feasible": feasible,
         "infeasible": infeasible,
         "unknown": unknown,
