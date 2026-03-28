@@ -40,6 +40,8 @@ Pipeline for generating 10-element matroids (representable and sparse paving) an
 11. Optional: remove bulky experimental intermediates while keeping canonical representable outputs and deduplicated sparse outputs:
    - `uv run python python/cleanup_artifacts.py`
    - `uv run python python/cleanup_artifacts.py --apply`
+12. Optional: benchmark unique h-vectors for hardness ranking and counterexample search:
+   - `uv run python python/hardness_benchmark.py --in artifacts/pure_o_results.jsonl --out artifacts/hardness_unique_hvectors.jsonl --summary-out artifacts/hardness_summary.json`
 
 ## Web UI
 

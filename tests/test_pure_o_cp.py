@@ -7,7 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from python import pure_o_cp
 
 
-def test_main_caches_duplicate_h_vectors(monkeypatch, tmp_path):
+def test_main_caches_duplicate_h_vectors(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    tmp_path = repo_root / ".pytest_tmp_manual" / "pure_o_cp"
+    tmp_path.mkdir(parents=True, exist_ok=True)
     in_path = tmp_path / "hvec.jsonl"
     out_path = tmp_path / "results.jsonl"
     stats_path = tmp_path / "stats.json"
@@ -30,6 +33,7 @@ def test_main_caches_duplicate_h_vectors(monkeypatch, tmp_path):
             status="FEASIBLE",
             wall_time=0.01,
             model_size={"num_vars": 1, "num_constraints": 1, "num_degree_buckets": 1},
+            solver_stats={"wall_time": 0.01, "num_conflicts": 2, "num_branches": 3},
         )
 
     monkeypatch.setattr(pure_o_cp, "solve_h_vector", fake_solve)
@@ -62,3 +66,4 @@ def test_main_caches_duplicate_h_vectors(monkeypatch, tmp_path):
 
     output_records = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
     assert [record["cp_status"] for record in output_records] == ["FEASIBLE", "FEASIBLE", "FEASIBLE"]
+    assert output_records[0]["cp_solver_stats"]["num_conflicts"] == 2

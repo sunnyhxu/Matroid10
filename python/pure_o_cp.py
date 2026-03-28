@@ -40,6 +40,37 @@ class CPResult:
     model_size: Dict[str, int]
     error: str | None = None
     witness: Dict[str, Any] | None = None
+    solver_stats: Dict[str, Any] | None = None
+
+
+def infer_n_vars_from_h_vector(h_vector: List[int]) -> int:
+    n_vars = h_vector[1] if len(h_vector) > 1 else 1
+    return max(1, int(n_vars))
+
+
+def extract_solver_stats(solver: Any, wall_time: float) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {"wall_time": float(wall_time)}
+
+    for field_name, method_name in (
+        ("num_conflicts", "NumConflicts"),
+        ("num_branches", "NumBranches"),
+    ):
+        method = getattr(solver, method_name, None)
+        if method is None:
+            continue
+        try:
+            stats[field_name] = int(method())
+        except Exception:  # noqa: BLE001
+            continue
+
+    response_method = getattr(solver, "ResponseStats", None)
+    if response_method is not None:
+        try:
+            stats["response_stats"] = str(response_method())
+        except Exception:  # noqa: BLE001
+            pass
+
+    return stats
 
 
 def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int, emit_witness: bool = False) -> CPResult:
@@ -64,8 +95,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int, em
         )
 
     d = len(h_vector) - 1
-    n_vars = h_vector[1] if len(h_vector) > 1 else 1
-    n_vars = max(1, n_vars)
+    n_vars = infer_n_vars_from_h_vector(h_vector)
     by_deg = enumerate_monomials(n_vars, d)
 
     for k, hk in enumerate(h_vector):
@@ -128,6 +158,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int, em
     solver.parameters.num_search_workers = num_workers
     status = solver.Solve(model)
     wall_time = float(solver.WallTime())
+    solver_stats = extract_solver_stats(solver, wall_time)
 
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         cp_status = "FEASIBLE"
@@ -156,6 +187,7 @@ def solve_h_vector(h_vector: List[int], timeout_sec: float, num_workers: int, em
             "num_degree_buckets": len(by_deg),
         },
         witness=witness,
+        solver_stats=solver_stats,
     )
 
 
@@ -182,6 +214,7 @@ def write_counterexample(path: str, record: Dict[str, object], result: CPResult,
             "wall_time": result.wall_time,
             "model_size": result.model_size,
             "error": result.error,
+            "solver_stats": result.solver_stats,
         },
         "solver_config": {
             "timeout_seconds": timeout_sec,
@@ -246,6 +279,8 @@ def main() -> int:
             output_record["cp_status"] = result.status
             output_record["cp_time_sec"] = result.wall_time
             output_record["cp_model_size"] = result.model_size
+            if result.solver_stats:
+                output_record["cp_solver_stats"] = result.solver_stats
             if result.error:
                 output_record["cp_error"] = result.error
 
