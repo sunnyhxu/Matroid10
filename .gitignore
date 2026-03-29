@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 .pytest_cache/
+.pytest_tmp_manual/
 .venv/
 *.pyc
 
