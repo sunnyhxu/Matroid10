@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Callable, DefaultDict, Dict, Iterable, List, Mapping, Sequence
 
 try:
     from ..common import read_jsonl
@@ -81,6 +82,7 @@ class NeuroSymbolicController:
         seed: int = 0,
     ) -> None:
         self.bootstrap_regions = list(bootstrap_regions)
+        self._bootstrap_regions_by_key = {region.region_key.value: region for region in self.bootstrap_regions}
         self.seed_candidates_by_region = {key: list(value) for key, value in seed_candidates_by_region.items()}
         self.problem_specs = dict(problem_specs)
         self.region_policy = region_policy
@@ -100,26 +102,46 @@ class NeuroSymbolicController:
         self.replay_rows: List[Dict[str, Any]] = []
         self._candidate_store: Dict[str, CandidateRecord] = {}
         self._seed_offsets: Dict[str, int] = {region.region_key.value: 0 for region in self.bootstrap_regions}
+        self._attempted_action_ids: DefaultDict[str, set[str]] = defaultdict(set)
+        self._exhausted_parent_keys: set[str] = set()
 
-    def _choose_region(self) -> tuple[BootstrapRegionRecord, Dict[str, Any]] | None:
+    def _search_stats(self) -> Dict[str, int]:
+        return {
+            "novelty_count": len(self._candidate_store),
+            "timeout_count": self.queues.counts()["escalation"],
+            "escalation_count": self.queues.counts()["escalation"],
+            "revisit_count": sum(node.revisit_count for node in self.graph.instance_nodes.values()),
+        }
+
+    def _synthetic_region_record(self, region_key: str, candidate: CandidateRecord) -> Dict[str, Any]:
+        h_vector = [int(value) for value in (candidate.h_vector or [])]
+        return {
+            "h_vector": h_vector,
+            "h_vector_key": region_key,
+            "source_records": 1,
+            "current_solver": {"status": "UNKNOWN", "wall_time": 0.0, "metrics": {}},
+            "top_level_solver": {"status": "UNKNOWN", "wall_time": 0.0, "metrics": {}},
+            "structural_metrics": {"raw_score": 0.0, "macaulay_total_slack": 0.0, "late_drop_sum": 0.0},
+            "current_solver_score": 0.0,
+            "top_level_solver_score": 0.0,
+            "structural_score": 0.0,
+            "combined_score": 0.0,
+        }
+
+    def _region_features_for_candidate(self, region_key: str, candidate: CandidateRecord) -> Dict[str, Any]:
+        region_record = self._bootstrap_regions_by_key.get(region_key)
+        if region_record is None:
+            region_record = self._synthetic_region_record(region_key, candidate)
+        return extract_region_features(region_record, search_stats=self._search_stats())
+
+    def _ranked_regions(self) -> List[tuple[float, str, BootstrapRegionRecord, Dict[str, Any]]]:
         scored: List[tuple[float, str, BootstrapRegionRecord, Dict[str, Any]]] = []
         for region in self.bootstrap_regions:
-            region_features = extract_region_features(
-                region,
-                search_stats={
-                    "novelty_count": len(self._candidate_store),
-                    "timeout_count": self.queues.counts()["escalation"],
-                    "escalation_count": self.queues.counts()["escalation"],
-                    "revisit_count": 0,
-                },
-            )
+            region_features = extract_region_features(region, search_stats=self._search_stats())
             score = float(self.region_policy.predict_score(region_features))
             scored.append((score, region.region_key.value, region, region_features))
-        if not scored:
-            return None
         scored.sort(key=lambda item: (-item[0], item[1]))
-        _, _, region, region_features = scored[0]
-        return region, region_features
+        return scored
 
     def _ensure_seed_inserted(self, candidate: CandidateRecord):
         spec = self.problem_specs[candidate.family.value]
@@ -132,24 +154,105 @@ class NeuroSymbolicController:
         self._candidate_store.setdefault(insert_result.canonical_key.key, candidate)
         return insert_result, spec
 
-    def _choose_parent_candidate(self, region_key: str) -> tuple[str, CandidateRecord, Any] | None:
-        queued = self.queues.pop_continue_for_region(region_key)
-        if queued is not None and queued.canonical_key in self._candidate_store:
-            candidate = self._candidate_store[queued.canonical_key]
-            spec = self.problem_specs[candidate.family.value]
-            return queued.canonical_key, candidate, spec
+    def _score_available_actions(
+        self,
+        *,
+        parent_key: str,
+        parent_candidate: CandidateRecord,
+        spec: Any,
+        region_features: Mapping[str, Any],
+    ) -> List[tuple[float, str, Any, Dict[str, Any], CostPrediction]]:
+        if parent_key in self._exhausted_parent_keys:
+            return []
 
-        seeds = self.seed_candidates_by_region.get(region_key, [])
-        if not seeds:
-            return None
-        offset = self._seed_offsets.get(region_key, 0)
-        candidate = seeds[offset % len(seeds)]
-        self._seed_offsets[region_key] = offset + 1
-        insert_result, spec = self._ensure_seed_inserted(candidate)
-        return insert_result.canonical_key.key, candidate, spec
+        duplicate_history = 0
+        node = self.graph.instance_nodes.get(parent_key)
+        if node is not None:
+            duplicate_history = sum(1 for outcome in node.outcome_history if outcome.label == "duplicate_isomorph")
+
+        attempted_action_ids = self._attempted_action_ids[parent_key]
+        scored_actions: List[tuple[float, str, Any, Dict[str, Any], CostPrediction]] = []
+        for action in spec.enumerate_valid_actions(parent_candidate):
+            if action.action_id in attempted_action_ids:
+                continue
+            action_features = extract_instance_action_features(
+                parent_candidate,
+                action,
+                region_features,
+                duplicate_isomorph_history=duplicate_history,
+            )
+            instance_score = float(self.instance_policy.predict_score(action_features))
+            cost_prediction = self.cost_policy.predict(action_features)
+            scored_actions.append((instance_score, action.action_id, action, action_features, cost_prediction))
+        scored_actions.sort(key=lambda item: (-item[0], item[1]))
+        if not scored_actions:
+            self._exhausted_parent_keys.add(parent_key)
+        return scored_actions
+
+    def _pop_queued_parent(
+        self,
+    ) -> tuple[str, CandidateRecord, Any, str, Dict[str, Any], float, List[tuple[float, str, Any, Dict[str, Any], CostPrediction]]] | None:
+        while True:
+            queued = self.queues.pop_continue()
+            if queued is None:
+                return None
+            if queued.canonical_key in self._exhausted_parent_keys:
+                continue
+            candidate = self._candidate_store.get(queued.canonical_key)
+            if candidate is None:
+                continue
+            spec = self.problem_specs[candidate.family.value]
+            region_key = spec.region_key(candidate).value
+            region_features = self._region_features_for_candidate(region_key, candidate)
+            scored_actions = self._score_available_actions(
+                parent_key=queued.canonical_key,
+                parent_candidate=candidate,
+                spec=spec,
+                region_features=region_features,
+            )
+            if not scored_actions:
+                continue
+            region_score = float(self.region_policy.predict_score(region_features))
+            return queued.canonical_key, candidate, spec, region_key, region_features, region_score, scored_actions
+
+    def _choose_bootstrap_parent(
+        self,
+    ) -> tuple[str, CandidateRecord, Any, str, Dict[str, Any], float, List[tuple[float, str, Any, Dict[str, Any], CostPrediction]]] | None:
+        for region_score, _, region, region_features in self._ranked_regions():
+            seeds = self.seed_candidates_by_region.get(region.region_key.value, [])
+            if not seeds:
+                continue
+            offset = self._seed_offsets.get(region.region_key.value, 0)
+            for index in range(len(seeds)):
+                candidate = seeds[(offset + index) % len(seeds)]
+                insert_result, spec = self._ensure_seed_inserted(candidate)
+                parent_key = insert_result.canonical_key.key
+                if parent_key in self._exhausted_parent_keys:
+                    continue
+                scored_actions = self._score_available_actions(
+                    parent_key=parent_key,
+                    parent_candidate=candidate,
+                    spec=spec,
+                    region_features=region_features,
+                )
+                if not scored_actions:
+                    continue
+                self._seed_offsets[region.region_key.value] = offset + index + 1
+                return parent_key, candidate, spec, region.region_key.value, region_features, region_score, scored_actions
+        return None
+
+    def _choose_work_item(
+        self,
+    ) -> tuple[str, CandidateRecord, Any, str, Dict[str, Any], float, List[tuple[float, str, Any, Dict[str, Any], CostPrediction]]] | None:
+        queued = self._pop_queued_parent()
+        if queued is not None:
+            return queued
+        return self._choose_bootstrap_parent()
 
     def _label_from_verifier_results(self, results: Sequence[VerifierResult]) -> str:
         statuses = [result.status for result in results]
+        if any(status == "ERROR" for status in statuses):
+            return "verifier_error"
         if any(status == "INFEASIBLE" for status in statuses):
             return "solver_disagreement" if len(set(statuses)) > 1 else "counterexample_found"
         if any(status == "UNKNOWN" for status in statuses):
@@ -158,27 +261,12 @@ class NeuroSymbolicController:
 
     def run(self, max_steps: int) -> ControllerRunSummary:
         for _ in range(max_steps):
-            region_choice = self._choose_region()
-            if region_choice is None:
+            work_item = self._choose_work_item()
+            if work_item is None:
                 break
-            region, region_features = region_choice
-            parent_choice = self._choose_parent_candidate(region.region_key.value)
-            if parent_choice is None:
-                continue
-            parent_key, parent_candidate, spec = parent_choice
-
-            actions = list(spec.enumerate_valid_actions(parent_candidate))
-            if not actions:
-                continue
-
-            scored_actions: List[tuple[float, str, Any, Dict[str, Any], CostPrediction]] = []
-            for action in actions:
-                action_features = extract_instance_action_features(parent_candidate, action, region_features)
-                instance_score = float(self.instance_policy.predict_score(action_features))
-                cost_prediction = self.cost_policy.predict(action_features)
-                scored_actions.append((instance_score, action.action_id, action, action_features, cost_prediction))
-            scored_actions.sort(key=lambda item: (-item[0], item[1]))
+            parent_key, parent_candidate, spec, parent_region_key, region_features, region_score, scored_actions = work_item
             instance_score, _, action, action_features, cost_prediction = scored_actions[0]
+            self._attempted_action_ids[parent_key].add(action.action_id)
 
             mutated_candidate = spec.apply_action(parent_candidate, action)
             mutated_spec = self.problem_specs[mutated_candidate.family.value]
@@ -249,12 +337,24 @@ class NeuroSymbolicController:
                 reason=outcome_label,
             )
             self.queues.push(queue_destination, entry)
+            if len(scored_actions) > 1:
+                self.queues.push(
+                    "continue_search",
+                    QueueEntry(
+                        canonical_key=parent_key,
+                        region_key=parent_region_key,
+                        priority=float(scored_actions[1][0]),
+                        reason="remaining_actions",
+                    ),
+                )
+            else:
+                self._exhausted_parent_keys.add(parent_key)
 
             log_row = {
-                "region_key": region.region_key.value,
+                "region_key": parent_region_key,
                 "parent_key": parent_key,
                 "action": action.to_dict(),
-                "region_score": float(self.region_policy.predict_score(region_features)),
+                "region_score": region_score,
                 "instance_score": instance_score,
                 "cost_prediction": cost_prediction.to_dict(),
                 "canonicalization": insert_result.canonical_key.to_dict(),

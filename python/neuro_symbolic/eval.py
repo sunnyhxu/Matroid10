@@ -59,7 +59,9 @@ def evaluate_replay_rows(rows: Iterable[Mapping[str, Any]], strategy_name: str =
     escalation_rows = sum(
         1
         for row, label in zip(ordered_rows, normalized_labels)
-        if bool(row.get("censored_timeout")) or str(row["cost_bucket"]) == "likely_timeout" or label == "unknown_timeout"
+        if bool(row.get("censored_timeout"))
+        or str(row["cost_bucket"]) == "likely_timeout"
+        or label in {"unknown_timeout", "verifier_error"}
     )
     interesting_unknowns = sum(1 for label in normalized_labels if label == "unknown_timeout")
 

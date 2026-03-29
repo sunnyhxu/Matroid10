@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from python.neuro_symbolic.features import extract_instance_action_features, extract_region_features  # noqa: E402
 from python.neuro_symbolic.bootstrap import BootstrapRegionRecord  # noqa: E402
-from python.neuro_symbolic.policy_data import build_replay_row, cost_bucket_from_wall_time  # noqa: E402
+from python.neuro_symbolic.policy_data import build_replay_row, cost_bucket_from_wall_time, outcome_value  # noqa: E402
 from python.neuro_symbolic.policies import train_cost_policy, train_instance_policy, train_region_policy  # noqa: E402
 from python.neuro_symbolic.types import ActionSpec, CandidateFamily, CandidateRecord, CostBucket, RegionKey  # noqa: E402
 
@@ -72,6 +72,27 @@ def test_replay_rows_preserve_labels_and_censored_flags():
     assert row["outcome_label"] == "unknown_timeout"
     assert row["censored_timeout"] is True
     assert row["cost_bucket"] == "likely_timeout"
+
+
+def test_verifier_error_replay_rows_are_supported_and_score_as_non_rewarding():
+    region_features = extract_region_features(_region_record(0.4))
+    instance_features = extract_instance_action_features(
+        _candidate(CandidateFamily.REPRESENTABLE),
+        _action(CandidateFamily.REPRESENTABLE, "resample_one_column"),
+        region_features,
+    )
+
+    row = build_replay_row(
+        region_features=region_features,
+        instance_action_features=instance_features,
+        outcome_label="verifier_error",
+        cost_bucket=CostBucket.MEDIUM,
+        censored_timeout=False,
+    )
+
+    assert row["outcome_label"] == "verifier_error"
+    assert row["region_target"] == 0.0
+    assert outcome_value("verifier_error") == 0.0
 
 
 def test_cost_bucket_labels_are_stable_under_fixed_thresholds():

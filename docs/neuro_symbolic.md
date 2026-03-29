@@ -34,18 +34,28 @@ This means:
 - duplicate-isomorph actions can be logged without increasing node count
 - graph-event replay is expected to reconstruct the same seed membership and canonical node set as the original run
 
+## Queue-First Continuation
+The controller is queue-first once it has discovered feasible continuation work.
+
+- if `continue_search` is non-empty, the highest-priority queued candidate is expanded before any bootstrap region is rescored
+- discovered candidates can be expanded even when their `region_key` does not appear in `artifacts/hardness_unique_hvectors.jsonl`
+- parent/action attempts are tracked by parent canonical key, so the same `(parent, action_id)` pair is never retried
+- parents with remaining untried actions are requeued deterministically
+- exhausted parents are marked and are not requeued
+
 ## Family-Specific Actions
 `representable` candidates stay inside the matrix presentation. The action space includes bounded single-column resamples, small column-batch resamples, and constrained column replacements that are only emitted if the resulting matrix still has full-rank support.
 
 `sparse_paving` candidates stay inside the circuit-hyperplane family. The action space includes admissible add/remove/swap operations plus a bounded batch resample, again emitted only when the overlap constraint is preserved by construction.
 
 ## Timeout Interpretation
-Timeouts are treated as `unknown_timeout`, not as wins.
+Timeouts are treated as `unknown_timeout`, not as wins. Verifier process failures are treated as `verifier_error`, not as feasible outcomes.
 
 - cheap filters run first
 - the current reference solver runs next
 - the top-level solver runs next only when the cost bucket allows it
 - `unknown_timeout` routes to the escalation queue
+- `verifier_error` routes to the escalation queue
 - `counterexample_found` and `solver_disagreement` route to the terminal-complete queue
 - `exact_feasible` routes to the continue-search queue
 
@@ -114,6 +124,14 @@ python -m python.neuro_symbolic.eval \
   --summary-out artifacts/neuro_symbolic/manual_eval_summary.json \
   --include-no-canonical-merge
 ```
+
+For manual acceptance on a `--max-steps 200` exploratory run, confirm from the action log that:
+
+- more than one unique `region_key` appears
+- more than one unique `parent_key` appears
+- more than one unique `action.action_id` appears
+- duplicate-isomorph rate stays below `0.95`
+- no row has any verifier with status `ERROR` while `outcome_label` is `exact_feasible`
 
 ## V1 Non-Goals
 - No online policy updates during search.

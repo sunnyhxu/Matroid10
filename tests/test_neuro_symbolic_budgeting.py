@@ -25,5 +25,6 @@ def test_verifier_budget_uses_cost_bucket_for_timeout_and_schedule():
 
 def test_unknown_timeout_routes_to_escalation_queue():
     assert route_outcome_to_queue("unknown_timeout") == "escalation"
+    assert route_outcome_to_queue("verifier_error") == "escalation"
     assert route_outcome_to_queue("exact_feasible") == "continue_search"
     assert route_outcome_to_queue("counterexample_found") == "terminal_complete"

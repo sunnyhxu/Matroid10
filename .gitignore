@@ -11,6 +11,9 @@ cpp/build/
 # Artifacts
 artifacts/
 
+# Scripts
+scripts/*.py
+
 # Editors
 .vscode/
 .idea/
@@ -22,7 +25,11 @@ Thumbs.db
 .cache_verify/
 .verify_extract/
 
-agents.md
+AGENTS.md
+CLAUDE.md
 .claude/
 .codex/
+
 plans/
+tasks/
+templates/

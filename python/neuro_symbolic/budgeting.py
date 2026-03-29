@@ -31,7 +31,7 @@ def verifier_budget_from_prediction(
 
 
 def route_outcome_to_queue(outcome_label: str) -> str:
-    if outcome_label == "unknown_timeout":
+    if outcome_label in {"unknown_timeout", "verifier_error"}:
         return "escalation"
     if outcome_label == "exact_feasible":
         return "continue_search"

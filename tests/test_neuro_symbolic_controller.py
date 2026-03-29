@@ -34,6 +34,17 @@ class _CostPolicy:
         return CostPrediction(bucket=self.bucket, timeout_risk=0.5, confidence=0.8, details={"source": "test"})
 
 
+class _ActionTypeScorePolicy:
+    def __init__(self, scores):
+        self.scores = dict(scores)
+
+    def predict_score(self, features):
+        action_type = features.get("action_type")
+        if action_type is None:
+            return float(features.get("combined_score", 0.0) or 0.0)
+        return float(self.scores.get(action_type, 0.0))
+
+
 class _DummySpec(ProblemSpec):
     def __init__(self, mode: str) -> None:
         self.mode = mode
@@ -112,6 +123,46 @@ class _SpySpec(_DummySpec):
         return CanonicalKey(key=self._canonical_key, display_id=self._canonical_display_id, digest="spy-digest")
 
 
+class _ExplorationSpec(ProblemSpec):
+    def __init__(self, candidates):
+        self.candidates = dict(candidates)
+
+    def family_name(self) -> str:
+        return CandidateFamily.REPRESENTABLE.value
+
+    def region_key(self, candidate: CandidateRecord) -> RegionKey:
+        region_key = str(candidate.metadata["region_key"])
+        return RegionKey(value=region_key, display_id=region_key, family=None, components=list(candidate.h_vector or []))
+
+    def canonicalize(self, candidate: CandidateRecord):
+        canonical_key = str(candidate.metadata["canonical_key"])
+        return CanonicalKey(key=canonical_key, display_id=canonical_key, digest=f"digest:{canonical_key}")
+
+    def enumerate_valid_actions(self, candidate: CandidateRecord):
+        actions = []
+        for action_row in candidate.metadata.get("actions", []):
+            actions.append(
+                ActionSpec(
+                    action_id=str(action_row["action_id"]),
+                    family=CandidateFamily.REPRESENTABLE,
+                    action_type=str(action_row["action_type"]),
+                    parameters={"next_candidate_id": str(action_row["next_candidate_id"])},
+                    locality="single_column",
+                    cross_region=False,
+                )
+            )
+        return actions
+
+    def apply_action(self, candidate: CandidateRecord, action: ActionSpec):
+        return self.candidates[str(action.parameters["next_candidate_id"])]
+
+    def cheap_filters(self, candidate: CandidateRecord):
+        return [FilterResult(name="blocked", passed=True, reason=None, details={})]
+
+    def exact_verifiers(self):
+        return [{"name": "reference_solver"}]
+
+
 def _bootstrap_region() -> BootstrapRegionRecord:
     return BootstrapRegionRecord(
         region_key=RegionKey(value="h_vector:[1,2,1]", display_id="[1,2,1]", family=None, components=[1, 2, 1]),
@@ -140,6 +191,29 @@ def _seed_candidate() -> CandidateRecord:
         n=4,
         bases=[5, 6, 9, 10, 12],
         h_vector=[1, 2, 1],
+    )
+
+
+def _exploration_candidate(
+    candidate_id: str,
+    *,
+    region_key: str,
+    canonical_key: str,
+    h_vector,
+    actions,
+) -> CandidateRecord:
+    return CandidateRecord(
+        candidate_id=candidate_id,
+        family=CandidateFamily.REPRESENTABLE,
+        rank=2,
+        n=4,
+        bases=[5, 6, 9, 10, 12],
+        h_vector=list(h_vector),
+        metadata={
+            "region_key": region_key,
+            "canonical_key": canonical_key,
+            "actions": list(actions),
+        },
     )
 
 
@@ -219,6 +293,157 @@ def test_timeout_enters_escalation_queue_and_not_terminal_complete():
     assert summary.action_logs[0]["queue_destination"] == "escalation"
     assert summary.queue_counts["escalation"] == 1
     assert summary.queue_counts["terminal_complete"] == 0
+
+
+def test_controller_expands_discovered_continuation_before_reseeding_bootstrap_parent():
+    seed = _exploration_candidate(
+        "seed-a",
+        region_key="h_vector:[1,2,1]",
+        canonical_key="seed",
+        h_vector=[1, 2, 1],
+        actions=[
+            {"action_id": "seed:to_discovered", "action_type": "seed_to_discovered", "next_candidate_id": "child"},
+            {"action_id": "seed:backup", "action_type": "seed_backup", "next_candidate_id": "sibling"},
+        ],
+    )
+    child = _exploration_candidate(
+        "child",
+        region_key="h_vector:[2,2,1]",
+        canonical_key="child",
+        h_vector=[2, 2, 1],
+        actions=[
+            {"action_id": "child:advance", "action_type": "child_advance", "next_candidate_id": "leaf"},
+        ],
+    )
+    sibling = _exploration_candidate(
+        "sibling",
+        region_key="h_vector:[1,2,1]",
+        canonical_key="sibling",
+        h_vector=[1, 2, 1],
+        actions=[],
+    )
+    leaf = _exploration_candidate(
+        "leaf",
+        region_key="h_vector:[2,2,2]",
+        canonical_key="leaf",
+        h_vector=[2, 2, 2],
+        actions=[],
+    )
+    spec = _ExplorationSpec({candidate.candidate_id: candidate for candidate in [seed, child, sibling, leaf]})
+
+    controller = NeuroSymbolicController(
+        bootstrap_regions=[_bootstrap_region()],
+        seed_candidates_by_region={"h_vector:[1,2,1]": [seed]},
+        problem_specs={CandidateFamily.REPRESENTABLE.value: spec},
+        region_policy=_ScorePolicy(),
+        instance_policy=_ActionTypeScorePolicy(
+            {
+                "seed_to_discovered": 10.0,
+                "seed_backup": 1.0,
+                "child_advance": 9.0,
+            }
+        ),
+        cost_policy=_CostPolicy(CostBucket.CHEAP),
+        verifier_functions={
+            "reference_solver": lambda candidate, timeout_seconds: VerifierResult(
+                name="reference_solver",
+                status="FEASIBLE",
+                wall_time=timeout_seconds,
+                details={},
+                censored=False,
+            ),
+        },
+    )
+
+    summary = controller.run(max_steps=3)
+
+    assert [row["parent_key"] for row in summary.action_logs] == ["seed", "child", "seed"]
+    assert [row["region_key"] for row in summary.action_logs] == [
+        "h_vector:[1,2,1]",
+        "h_vector:[2,2,1]",
+        "h_vector:[1,2,1]",
+    ]
+    assert [row["action"]["action_id"] for row in summary.action_logs] == [
+        "seed:to_discovered",
+        "child:advance",
+        "seed:backup",
+    ]
+
+
+def test_controller_never_retries_same_parent_action_pair_and_marks_parent_exhausted():
+    seed = _exploration_candidate(
+        "seed-a",
+        region_key="h_vector:[1,2,1]",
+        canonical_key="seed",
+        h_vector=[1, 2, 1],
+        actions=[
+            {"action_id": "seed:only", "action_type": "seed_only", "next_candidate_id": "leaf"},
+        ],
+    )
+    leaf = _exploration_candidate(
+        "leaf",
+        region_key="h_vector:[2,2,1]",
+        canonical_key="leaf",
+        h_vector=[2, 2, 1],
+        actions=[],
+    )
+    spec = _ExplorationSpec({candidate.candidate_id: candidate for candidate in [seed, leaf]})
+
+    controller = NeuroSymbolicController(
+        bootstrap_regions=[_bootstrap_region()],
+        seed_candidates_by_region={"h_vector:[1,2,1]": [seed]},
+        problem_specs={CandidateFamily.REPRESENTABLE.value: spec},
+        region_policy=_ScorePolicy(),
+        instance_policy=_ActionTypeScorePolicy({"seed_only": 5.0}),
+        cost_policy=_CostPolicy(CostBucket.CHEAP),
+        verifier_functions={
+            "reference_solver": lambda candidate, timeout_seconds: VerifierResult(
+                name="reference_solver",
+                status="FEASIBLE",
+                wall_time=timeout_seconds,
+                details={},
+                censored=False,
+            ),
+        },
+    )
+
+    summary = controller.run(max_steps=4)
+
+    assert len(summary.action_logs) == 1
+    assert summary.action_logs[0]["parent_key"] == "seed"
+    assert summary.action_logs[0]["action"]["action_id"] == "seed:only"
+    assert controller._attempted_action_ids["seed"] == {"seed:only"}
+    assert "seed" in controller._exhausted_parent_keys
+    assert "leaf" in controller._exhausted_parent_keys
+    assert controller.queues.counts()["continue_search"] == 0
+
+
+def test_verifier_error_routes_to_escalation_and_stays_distinct_from_exact_feasible():
+    controller = NeuroSymbolicController(
+        bootstrap_regions=[_bootstrap_region()],
+        seed_candidates_by_region={"h_vector:[1,2,1]": [_seed_candidate()]},
+        problem_specs={CandidateFamily.REPRESENTABLE.value: _DummySpec("timeout")},
+        region_policy=_ScorePolicy(),
+        instance_policy=_ScorePolicy(),
+        cost_policy=_CostPolicy(CostBucket.CHEAP),
+        verifier_functions={
+            "reference_solver": lambda candidate, timeout_seconds: VerifierResult(
+                name="reference_solver",
+                status="ERROR",
+                wall_time=timeout_seconds,
+                details={"message": "solver crashed"},
+                censored=False,
+            ),
+        },
+    )
+
+    summary = controller.run(max_steps=1)
+
+    assert summary.action_logs[0]["outcome_label"] == "verifier_error"
+    assert summary.action_logs[0]["queue_destination"] == "escalation"
+    assert summary.replay_rows[0]["outcome_label"] == "verifier_error"
+    assert summary.queue_counts["escalation"] == 1
+    assert summary.queue_counts["continue_search"] == 0
 
 
 def test_end_to_end_controller_logs_are_deterministic_under_fixed_seed():

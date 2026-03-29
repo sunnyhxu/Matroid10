@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from python.neuro_symbolic.controller import run_controller_from_paths
 from python.neuro_symbolic.policies import CostPolicyModel, LinearScoreModel

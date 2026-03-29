@@ -40,9 +40,19 @@ def test_action_log_summary_reports_queue_and_verifier_spend():
 
     summary = summarize_action_logs(rows)
 
-    assert summary["queue_counts"]["escalation"] == 1
+    assert summary["queue_counts"]["escalation"] == 2
     assert summary["outcome_counts"]["duplicate_isomorph"] == 1
+    assert summary["outcome_counts"]["verifier_error"] == 1
     assert summary["verifier_spend_by_stage"]["reference_solver"] > 0.0
+
+
+def test_replay_eval_keeps_verifier_error_distinct_and_non_interesting():
+    rows = read_replay_rows(_fixture_path("neuro_symbolic_replay_rows.jsonl"))
+
+    summary = evaluate_replay_rows(rows, strategy_name="observed")
+
+    assert summary["rows_evaluated"] == 5
+    assert summary["escalation_yield"] < 1.0
 
 
 def test_docs_reference_real_commands_and_output_files():
