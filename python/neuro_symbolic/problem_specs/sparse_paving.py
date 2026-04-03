@@ -155,13 +155,21 @@ class SparsePavingProblemSpec(ProblemSpec):
 
     def cheap_filters(self, candidate: CandidateRecord) -> Sequence[FilterResult]:
         passed = sparse_paving_candidate_is_valid(candidate)
+        h_vector = candidate.h_vector or []
+        trailing_zeros_passed = not h_vector or int(h_vector[-1]) != 0
         return [
             FilterResult(
                 name="sparse_paving_overlap_constraint",
                 passed=passed,
                 reason=None if passed else "overlap_constraint_failed",
                 details={"family": self.family_name()},
-            )
+            ),
+            FilterResult(
+                name="h_vector_trailing_zeros",
+                passed=trailing_zeros_passed,
+                reason=None if trailing_zeros_passed else "h_vector_trailing_zeros",
+                details={"family": self.family_name()},
+            ),
         ]
 
     def exact_verifiers(self) -> Sequence[Dict[str, Any]]:

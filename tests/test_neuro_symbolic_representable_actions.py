@@ -1,3 +1,4 @@
+from dataclasses import replace
 import sys
 from pathlib import Path
 
@@ -66,3 +67,23 @@ def test_representable_action_application_keeps_provenance_stable_under_canonica
     assert mutated.metadata["provenance"]["action_id"] == action.action_id
     assert mutated.metadata["provenance"]["family"] == "representable"
     assert first.key == second.key
+
+
+def test_representable_cheap_filters_block_trailing_zero_h_vectors():
+    spec = RepresentableProblemSpec()
+    candidate = _candidate()
+
+    trailing_zero_candidate = replace(candidate, h_vector=[1, 3, 5, 0])
+    passing_candidate = replace(candidate, h_vector=[1, 3, 5, 2])
+    empty_candidate = replace(candidate, h_vector=[])
+    none_candidate = replace(candidate, h_vector=None)
+
+    trailing_zero_results = spec.cheap_filters(trailing_zero_candidate)
+    passing_results = spec.cheap_filters(passing_candidate)
+    empty_results = spec.cheap_filters(empty_candidate)
+    none_results = spec.cheap_filters(none_candidate)
+
+    assert any(result.name == "h_vector_trailing_zeros" and not result.passed for result in trailing_zero_results)
+    assert all(result.passed for result in passing_results if result.name == "h_vector_trailing_zeros")
+    assert all(result.passed for result in empty_results if result.name == "h_vector_trailing_zeros")
+    assert all(result.passed for result in none_results if result.name == "h_vector_trailing_zeros")
