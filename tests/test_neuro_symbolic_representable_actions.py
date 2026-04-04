@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from python.neuro_symbolic.actions import (  # noqa: E402
     compute_h_vector_from_bases,
+    encode_matrix_col,
     enumerate_representable_bases,
     representable_candidate_is_valid,
 )
@@ -23,6 +24,28 @@ def _candidate() -> CandidateRecord:
         rank=2,
         n=4,
         field=2,
+        matrix_cols=matrix_cols,
+        bases=bases,
+        h_vector=h_vector,
+    )
+
+
+def _gf3_candidate() -> CandidateRecord:
+    matrix_cols = [
+        encode_matrix_col((1, 0, 0), 3),
+        encode_matrix_col((0, 1, 0), 3),
+        encode_matrix_col((0, 0, 1), 3),
+        encode_matrix_col((1, 1, 1), 3),
+        encode_matrix_col((1, 2, 1), 3),
+    ]
+    bases = enumerate_representable_bases(field=3, rank=3, n=5, matrix_cols=matrix_cols)
+    h_vector = compute_h_vector_from_bases(bases, rank=3, n=5)
+    return CandidateRecord(
+        candidate_id="rep-gf3-seed",
+        family=CandidateFamily.REPRESENTABLE,
+        rank=3,
+        n=5,
+        field=3,
         matrix_cols=matrix_cols,
         bases=bases,
         h_vector=h_vector,
@@ -87,3 +110,48 @@ def test_representable_cheap_filters_block_trailing_zero_h_vectors():
     assert all(result.passed for result in passing_results if result.name == "h_vector_trailing_zeros")
     assert all(result.passed for result in empty_results if result.name == "h_vector_trailing_zeros")
     assert all(result.passed for result in none_results if result.name == "h_vector_trailing_zeros")
+
+
+def test_resample_one_column_emits_both_alternative_values_for_gf3_cell():
+    spec = RepresentableProblemSpec()
+    candidate = _gf3_candidate()
+
+    assert representable_candidate_is_valid(candidate)
+
+    actions = spec.enumerate_valid_actions(candidate)
+    new_values = {
+        int(action.parameters["new_value"])
+        for action in actions
+        if action.action_type == "resample_one_column"
+        and int(action.parameters["column_index"]) == 0
+        and int(action.parameters["row_index"]) == 0
+    }
+
+    assert new_values == {0, 2}
+
+
+def test_resample_one_column_count_is_unchanged_for_gf2_fixture():
+    spec = RepresentableProblemSpec()
+    candidate = _candidate()
+
+    actions = spec.enumerate_valid_actions(candidate)
+    resample_actions = [action for action in actions if action.action_type == "resample_one_column"]
+
+    assert len(resample_actions) == 8
+
+
+def test_resample_column_batch_uses_fixed_first_row_pair_for_gf3_fixture():
+    spec = RepresentableProblemSpec()
+    candidate = _gf3_candidate()
+
+    assert representable_candidate_is_valid(candidate)
+
+    actions = spec.enumerate_valid_actions(candidate)
+    row_pairs = {
+        tuple(int(value) for value in action.parameters["row_indices"])
+        for action in actions
+        if action.action_type == "resample_column_batch"
+        and [int(value) for value in action.parameters["column_indices"]] == [0, 1]
+    }
+
+    assert row_pairs == {(0, 0)}

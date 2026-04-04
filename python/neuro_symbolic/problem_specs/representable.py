@@ -78,19 +78,18 @@ class RepresentableProblemSpec(ProblemSpec):
         for column_index, encoded in enumerate(candidate.matrix_cols):
             digits = decode_matrix_col(encoded, candidate.field, candidate.rank)
             for row_index in range(candidate.rank):
-                new_digits = list(digits)
-                new_digits[row_index] = (new_digits[row_index] + 1) % candidate.field
-                if new_digits == digits:
-                    continue
-                maybe_add(
-                    "resample_one_column",
-                    {
-                        "column_index": column_index,
-                        "row_index": row_index,
-                        "new_value": new_digits[row_index],
-                    },
-                    "single_column",
-                )
+                for new_value in range(candidate.field):
+                    if new_value == digits[row_index]:
+                        continue
+                    maybe_add(
+                        "resample_one_column",
+                        {
+                            "column_index": column_index,
+                            "row_index": row_index,
+                            "new_value": new_value,
+                        },
+                        "single_column",
+                    )
 
         for column_index in range(max(0, candidate.n - 1)):
             maybe_add(

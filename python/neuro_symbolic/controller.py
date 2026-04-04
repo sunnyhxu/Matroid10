@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from .bootstrap import BootstrapRegionRecord, load_bootstrap_regions
 from .budgeting import route_outcome_to_queue, verifier_budget_from_prediction
 from .features import extract_instance_action_features, extract_region_features
 from .policy_data import build_replay_row, write_replay_rows
+from .policies import train_region_policy, train_instance_policy, train_cost_policy
 from .queues import QueueEntry, SearchQueues
 from .state_graph import SearchStateGraph
 from .store import write_graph_events
@@ -80,6 +82,9 @@ class NeuroSymbolicController:
         verifier_functions: Mapping[str, VerifierFn] | None = None,
         base_timeout_seconds: float = 5.0,
         seed: int = 0,
+        ucb_beta: float = 0.5,
+        retrain_interval: int = 25,
+        min_retrain_size: int = 10,
     ) -> None:
         self.bootstrap_regions = list(bootstrap_regions)
         self._bootstrap_regions_by_key = {region.region_key.value: region for region in self.bootstrap_regions}
@@ -96,6 +101,9 @@ class NeuroSymbolicController:
             self.verifier_functions.update(verifier_functions)
         self.base_timeout_seconds = float(base_timeout_seconds)
         self.seed = int(seed)
+        self.ucb_beta = float(ucb_beta)
+        self.retrain_interval = int(retrain_interval)
+        self.min_retrain_size = int(min_retrain_size)
         self.graph = SearchStateGraph()
         self.queues = SearchQueues()
         self.action_logs: List[Dict[str, Any]] = []
@@ -104,6 +112,8 @@ class NeuroSymbolicController:
         self._seed_offsets: Dict[str, int] = {region.region_key.value: 0 for region in self.bootstrap_regions}
         self._attempted_action_ids: DefaultDict[str, set[str]] = defaultdict(set)
         self._exhausted_parent_keys: set[str] = set()
+        self._region_visit_counts: Dict[str, int] = {}
+        self._total_region_visits: int = 0
 
     def _search_stats(self) -> Dict[str, int]:
         return {
@@ -139,7 +149,10 @@ class NeuroSymbolicController:
         for region in self.bootstrap_regions:
             region_features = extract_region_features(region, search_stats=self._search_stats())
             score = float(self.region_policy.predict_score(region_features))
-            scored.append((score, region.region_key.value, region, region_features))
+            n_i = self._region_visit_counts.get(region.region_key.value, 0)
+            ucb_bonus = self.ucb_beta * math.sqrt(math.log(self._total_region_visits + 1) / (n_i + 1))
+            effective_score = score + ucb_bonus
+            scored.append((effective_score, region.region_key.value, region, region_features))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored
 
@@ -238,6 +251,8 @@ class NeuroSymbolicController:
                 if not scored_actions:
                     continue
                 self._seed_offsets[region.region_key.value] = offset + index + 1
+                self._total_region_visits += 1
+                self._region_visit_counts[region.region_key.value] = self._region_visit_counts.get(region.region_key.value, 0) + 1
                 return parent_key, candidate, spec, region.region_key.value, region_features, region_score, scored_actions
         return None
 
@@ -259,8 +274,25 @@ class NeuroSymbolicController:
             return "unknown_timeout"
         return "exact_feasible"
 
+    def _maybe_retrain(self, step: int) -> None:
+        if step <= 0:
+            return
+        if step % self.retrain_interval != 0:
+            return
+        if len(self.replay_rows) < self.min_retrain_size:
+            return
+        self.region_policy = train_region_policy(self.replay_rows, seed=self.seed)
+        self.instance_policy = train_instance_policy(self.replay_rows, seed=self.seed)
+        self.cost_policy = train_cost_policy(self.replay_rows, seed=self.seed)
+        self.action_logs.append({
+            "event_type": "retrain",
+            "step": step,
+            "replay_size": len(self.replay_rows),
+            "seed": self.seed,
+        })
+
     def run(self, max_steps: int) -> ControllerRunSummary:
-        for _ in range(max_steps):
+        for step_index in range(max_steps):
             work_item = self._choose_work_item()
             if work_item is None:
                 break
@@ -375,6 +407,7 @@ class NeuroSymbolicController:
                     censored_timeout=any(result.censored for result in verifier_results),
                 )
             )
+            self._maybe_retrain(step_index)
 
         return ControllerRunSummary(
             action_logs=list(self.action_logs),
