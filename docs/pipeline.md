@@ -44,6 +44,25 @@ This repository implements a 3-phase search pipeline for 10-element matroids and
   - Aggregates metrics and writes run manifest.
   - Stops immediately and snapshots if first CP infeasible instance is found.
 
+## Hardness Benchmark
+
+- Program: `uv run python python/hardness_benchmark.py`
+- Input: any JSONL with `h_vector` fields, typically `artifacts/hvec.jsonl` or `artifacts/pure_o_results.jsonl`
+- Output:
+  - `artifacts/hardness_unique_hvectors.jsonl`
+  - optional `artifacts/hardness_summary.json`
+- Work:
+  - Deduplicate by exact h-vector.
+  - Run the current CP-SAT formulation once per unique h-vector.
+  - Run the top-level-vertex CP-SAT formulation once per unique h-vector.
+  - Compute structural metrics such as Macaulay slack and tail-drop pressure.
+  - Emit separate normalized scores for current-solver, top-level-solver, and structural difficulty, plus a weighted combined score.
+- Interpretation:
+  - `current_solver_score` captures empirical struggle in the original formulation.
+  - `top_level_solver_score` captures empirical struggle in the maximal-monomial formulation.
+  - `structural_score` captures mathematical bottleneck features independent of solver runtime.
+  - `combined_score_weights` is recorded per record so downstream tuning can change weights without losing provenance.
+
 ## Progress Ledger
 
 - Program: `uv run python python/search_progress.py`

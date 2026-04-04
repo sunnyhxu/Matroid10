@@ -38,6 +38,31 @@ Extends CP-attempted records with:
 - `cp_status` (`str`): `FEASIBLE|INFEASIBLE|UNKNOWN|ERROR`
 - `cp_time_sec` (`float`)
 - `cp_model_size` (`dict`): includes `num_vars`, `num_constraints`, `num_degree_buckets`
+- `cp_solver_stats` (`dict`, optional): may include `wall_time`, `num_conflicts`, `num_branches`, and `response_stats`
+
+## `hardness_unique_hvectors.jsonl`
+
+One record per unique h-vector benchmarked across both formulations:
+
+- `h_vector` (`list[int]`)
+- `h_vector_key` (`str`)
+- `source_records` (`int`): number of source JSONL rows sharing this h-vector
+- `example_record_id` (`str|null`)
+- `current_solver` (`dict`)
+  - `status` (`str`)
+  - `wall_time` (`float`)
+  - `model_size` (`dict`)
+  - `metrics` (`dict`)
+  - `score_components` (`dict`)
+  - `score_raw` (`float`)
+- `top_level_solver` (`dict`): same shape as `current_solver`
+- `structural_metrics` (`dict`): includes Macaulay slack/violation summaries, drop summaries, degree/capacity pressure, and `raw_score`
+- `current_solver_score` (`float`): normalized empirical difficulty for the current solver
+- `top_level_solver_score` (`float`): normalized empirical difficulty for the top-level formulation
+- `structural_score` (`float`): normalized structural difficulty
+- `combined_score_weights` (`dict`)
+- `score_normalization` (`str`): currently `percentile`
+- `combined_score` (`float`)
 
 ## `artifacts/progress_chunks/*.json`
 
